@@ -1,0 +1,23 @@
+{
+  "name": "distribution-system",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:clean": "powershell -ExecutionPolicy Bypass -File ./scripts/clean-restart.ps1",
+    "dev:api": "pnpm --filter @ds/api start:dev",
+    "dev:web": "pnpm --filter @ds/web dev",
+    "build:api": "pnpm --filter @ds/api build",
+    "build:web": "pnpm --filter @ds/web build",
+    "build": "pnpm -r build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.sqljs
+*.sqljs
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea/
+.vscode/
+coverage/
