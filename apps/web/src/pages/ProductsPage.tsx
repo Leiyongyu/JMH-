@@ -13,6 +13,7 @@ const GRID_MIN_WIDTH = 260;
 const GRID_GAP = 16;
 const RESERVED_BOTTOM_PX = 140;
 const MIN_AUTO_PAGE_SIZE = 8;
+const PRODUCTS_LIST_STATE_KEY = 'ds:products:listState';
 
 export function ProductsPage() {
   const { isAdmin } = useAuth();
@@ -43,6 +44,7 @@ export function ProductsPage() {
   const sortByRef = useRef(sortBy);
   const sortOrderRef = useRef(sortOrder);
   const resizeTimerRef = useRef<number | null>(null);
+  const pendingRestoreScrollYRef = useRef<number | null>(null);
 
   const load = (p = page, ps = pageSize, kw = keyword, sb = sortBy, so = sortOrder) => {
     setLoading(true);
@@ -54,6 +56,11 @@ export function ProductsPage() {
         setPage(r.page);
         setPageSize(r.pageSize);
         setLastSyncedAt(r.lastSyncedAt ?? null);
+        const y = pendingRestoreScrollYRef.current;
+        if (typeof y === 'number') {
+          pendingRestoreScrollYRef.current = null;
+          setTimeout(() => window.scrollTo(0, y), 0);
+        }
       })
       .finally(() => setLoading(false));
   };
@@ -149,10 +156,53 @@ export function ProductsPage() {
   };
 
   useEffect(() => {
-    const next = calcAutoPageSize();
-    pageSizeRef.current = next;
-    setPageSize(next);
-    load(1, next, '', sortByRef.current, sortOrderRef.current);
+    const autoPageSize = calcAutoPageSize();
+    const savedRaw = sessionStorage.getItem(PRODUCTS_LIST_STATE_KEY);
+    if (savedRaw) {
+      try {
+        const saved = JSON.parse(savedRaw) as {
+          page?: unknown;
+          pageSize?: unknown;
+          keyword?: unknown;
+          sortBy?: unknown;
+          sortOrder?: unknown;
+          scrollY?: unknown;
+        };
+
+        const savedPage = Math.max(1, Number(saved.page || 1));
+        const savedPageSize = Math.max(1, Number(saved.pageSize || autoPageSize));
+        const savedKeyword = typeof saved.keyword === 'string' ? saved.keyword : '';
+        const savedSortBy =
+          saved.sortBy === 'stockQty' || saved.sortBy === 'price' || saved.sortBy === 'sku' || saved.sortBy === 'syncedAt'
+            ? saved.sortBy
+            : 'stockQty';
+        const savedSortOrder = saved.sortOrder === 'ASC' ? 'ASC' : 'DESC';
+        const savedScrollY = typeof saved.scrollY === 'number' ? saved.scrollY : null;
+
+        setPage(savedPage);
+        setPageSize(savedPageSize);
+        setKeyword(savedKeyword);
+        setSortBy(savedSortBy);
+        setSortOrder(savedSortOrder);
+
+        pageSizeRef.current = savedPageSize;
+        keywordRef.current = savedKeyword;
+        sortByRef.current = savedSortBy;
+        sortOrderRef.current = savedSortOrder;
+
+        pendingRestoreScrollYRef.current = savedScrollY;
+        load(savedPage, savedPageSize, savedKeyword, savedSortBy, savedSortOrder);
+        sessionStorage.removeItem(PRODUCTS_LIST_STATE_KEY);
+      } catch {
+        pageSizeRef.current = autoPageSize;
+        setPageSize(autoPageSize);
+        load(1, autoPageSize, '', sortByRef.current, sortOrderRef.current);
+      }
+    } else {
+      pageSizeRef.current = autoPageSize;
+      setPageSize(autoPageSize);
+      load(1, autoPageSize, '', sortByRef.current, sortOrderRef.current);
+    }
     loadSyncRun();
     return () => {
       stopPolling();
@@ -451,7 +501,20 @@ export function ProductsPage() {
               <EbayProductCard
                 key={p.id}
                 product={p}
-                onOpen={() => navigate(`/products/${encodeURIComponent(p.sku)}`, { state: { product: p } })}
+                onOpen={() => {
+                  sessionStorage.setItem(
+                    PRODUCTS_LIST_STATE_KEY,
+                    JSON.stringify({
+                      page,
+                      pageSize: pageSizeRef.current,
+                      keyword: keywordRef.current,
+                      sortBy: sortByRef.current,
+                      sortOrder: sortOrderRef.current,
+                      scrollY: window.scrollY,
+                    }),
+                  );
+                  navigate(`/products/${encodeURIComponent(p.sku)}`, { state: { product: p } });
+                }}
                 onEdit={
                   isAdmin
                     ? () => openEdit(p)

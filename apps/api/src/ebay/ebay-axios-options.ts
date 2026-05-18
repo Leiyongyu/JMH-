@@ -5,6 +5,9 @@ import type { ConfigService } from '@nestjs/config';
 import type { AxiosRequestConfig } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
+let cachedKey = '';
+let cached: Pick<AxiosRequestConfig, 'httpsAgent' | 'proxy'> = {};
+
 export function ebayAxiosConnectionOptions(
   config: ConfigService,
 ): Pick<AxiosRequestConfig, 'httpsAgent' | 'proxy'> {
@@ -17,29 +20,38 @@ export function ebayAxiosConnectionOptions(
     process.env.HTTP_PROXY?.trim() ||
     '';
 
+  const ipv4First = config.get<string>('EBAY_IPV4_FIRST', 'true').toLowerCase() !== 'false';
+  const key = `${proxyRaw}::${ipv4First ? 'v4' : 'any'}`;
+  if (key && key === cachedKey) return cached;
+
   if (proxyRaw) {
     try {
       const agent = new HttpsProxyAgent(proxyRaw);
-      return { httpsAgent: agent, proxy: false };
+      cachedKey = key;
+      cached = { httpsAgent: agent as unknown as https.Agent, proxy: false };
+      return cached;
     } catch {
       // ignore invalid proxy URL
     }
   }
 
-  const ipv4First = config.get<string>('EBAY_IPV4_FIRST', 'true').toLowerCase() !== 'false';
   if (!ipv4First) {
-    return {};
+    cachedKey = key;
+    cached = {};
+    return cached;
   }
 
   const lookup: LookupFunction = (hostname, opts, cb) =>
     dns.lookup(hostname, { ...opts, family: 4 }, cb);
 
-  return {
+  cachedKey = key;
+  cached = {
     httpsAgent: new https.Agent({
       keepAlive: true,
+      keepAliveMsecs: 30_000,
       lookup,
     }),
     proxy: false,
   };
+  return cached;
 }
-

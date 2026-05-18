@@ -37,6 +37,8 @@ import ExcelJS from 'exceljs';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { resolve } from 'path';
 
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -56,6 +58,36 @@ export class AdminController {
     private readonly ebayUserOAuth: EbayUserOAuthService,
     private readonly sync: SyncService,
   ) {}
+
+  private ebayEnvFilePath(): string {
+    const candidates = [
+      resolve(process.cwd(), 'apps/api/.env'),
+      resolve(process.cwd(), '.env'),
+      resolve(__dirname, '../.env'),
+      resolve(__dirname, '../../.env'),
+      resolve(__dirname, '../../../.env'),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) return p;
+    }
+    throw new BadRequestException('未找到可写入的 .env（apps/api/.env 或根目录 .env）');
+  }
+
+  private writeEnvKeyValue(filePath: string, key: string, value: string) {
+    const content = readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const nextLine = `${key}="${value}"`;
+    let replaced = false;
+    const nextLines = lines.map((line) => {
+      if (line.trim().startsWith(`${key}=`)) {
+        replaced = true;
+        return nextLine;
+      }
+      return line;
+    });
+    if (!replaced) nextLines.push(nextLine);
+    writeFileSync(filePath, nextLines.join('\n'), 'utf8');
+  }
 
   @ApiOperation({ summary: '手动同步库存（异步，返回 run）' })
   @HttpCode(200)
@@ -140,6 +172,42 @@ export class AdminController {
     const code = String(body?.code ?? '').trim();
     if (!code) throw new BadRequestException('缺少 code');
     return this.ebayUserOAuth.exchangeCode(code);
+  }
+
+  @ApiOperation({ summary: 'eBay OAuth：用 code 换取 refresh token 并写入 apps/api/.env' })
+  @HttpCode(200)
+  @Post('ebay/oauth/exchange-save')
+  async ebayExchangeAndSave(@Body() body: { code?: string }) {
+    const code = String(body?.code ?? '').trim();
+    if (!code) throw new BadRequestException('缺少 code');
+    const result = await this.ebayUserOAuth.exchangeCode(code);
+    const refreshToken = String(result.refreshToken ?? '').trim();
+    if (!refreshToken) throw new BadRequestException('未获取到 refreshToken');
+
+    process.env.EBAY_USER_REFRESH_TOKEN = refreshToken;
+
+    const envPath = this.ebayEnvFilePath();
+    this.writeEnvKeyValue(envPath, 'EBAY_USER_REFRESH_TOKEN', refreshToken);
+
+    return {
+      saved: true,
+      file: envPath,
+      prefix: refreshToken.slice(0, 12),
+      length: refreshToken.length,
+      expiresIn: result.expiresIn,
+      refreshTokenExpiresIn: result.refreshTokenExpiresIn,
+    };
+  }
+
+  @ApiOperation({ summary: 'eBay OAuth：将当前 refresh token 写入 .env（不重新换取）' })
+  @HttpCode(200)
+  @Post('ebay/oauth/save-refresh-token')
+  ebaySaveRefreshToken() {
+    const refreshToken = String(process.env.EBAY_USER_REFRESH_TOKEN ?? '').trim();
+    if (!refreshToken) throw new BadRequestException('当前进程中未找到 EBAY_USER_REFRESH_TOKEN');
+    const envPath = this.ebayEnvFilePath();
+    this.writeEnvKeyValue(envPath, 'EBAY_USER_REFRESH_TOKEN', refreshToken);
+    return { saved: true, file: envPath, prefix: refreshToken.slice(0, 12), length: refreshToken.length };
   }
 
   @ApiOperation({ summary: '管理员：领星海外仓列表（从本地数据库读取）' })

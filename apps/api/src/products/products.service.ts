@@ -8,7 +8,8 @@ import { SyncService } from '../sync/sync.service';
 import { UpdateEbayProductDto } from '../admin/dto/update-ebay-product.dto';
 import { EbayItemPageService } from './scrape/ebay-item-page.service';
 import { EbayBrowseService } from '../ebay/ebay-browse.service';
-import { EbayTradingService } from '../ebay/ebay-trading.service';
+import { EbayUrlTestService } from '../ebay/ebay-url-test.service';
+import { EbayTestCacheService } from '../ebay/ebay-test-cache.service';
 import { extractLegacyItemIdFromItemUrl, marketplaceIdFromUrl } from '../ebay/ebay.util';
 import ExcelJS from 'exceljs';
 import { InventoryLine } from '../inventory/inventory-line.entity';
@@ -34,7 +35,8 @@ export class ProductsService {
     private readonly sync: SyncService,
     private readonly ebayPage: EbayItemPageService,
     private readonly ebayBrowse: EbayBrowseService,
-    private readonly ebayTrading: EbayTradingService,
+    private readonly ebayUrlTest: EbayUrlTestService,
+    private readonly ebayTestCache: EbayTestCacheService,
   ) {}
 
   private async hasMainImageCol(): Promise<boolean> {
@@ -366,7 +368,7 @@ export class ProductsService {
     } as unknown as EbayProduct & { availableQty?: number | null };
   }
 
-  async getEbayOfficialLiveBySku(sku: string) {
+  private async ebayItemUrlBySku(sku: string): Promise<string> {
     const skuNorm = String(sku ?? '').trim().toLowerCase();
     if (!skuNorm) throw new NotFoundException('商品不存在');
 
@@ -392,10 +394,163 @@ export class ProductsService {
     for (const r of rows) {
       const itemUrl = String(r?.itemUrl ?? '').trim();
       if (!itemUrl) continue;
-      return this.ebayTrading.getItemByUrl(itemUrl);
+      return itemUrl;
     }
 
     throw new NotFoundException('该商品未找到可用的 item_url');
+  }
+
+  private async refreshBrowseFromEbay(args: { sku: string; timeoutMs?: number }) {
+    const sku = String(args.sku ?? '').trim();
+    const itemUrl = await this.ebayItemUrlBySku(sku);
+    const res = await this.ebayUrlTest.browseByUrl(itemUrl, { timeoutMs: args.timeoutMs });
+    await this.ebayTestCache.saveBrowse({
+      sku,
+      itemId: res.itemId ?? null,
+      marketplaceId: res.marketplaceId,
+      itemWebUrl: res.basic?.itemWebUrl ?? null,
+      title: res.basic?.title ?? null,
+      priceValue: res.basic?.priceValue ?? null,
+      priceCurrency: res.basic?.priceCurrency ?? null,
+      condition: res.basic?.condition ?? null,
+      sellerUsername: res.basic?.sellerUsername ?? null,
+      availabilityStatus: res.basic?.availabilityStatus ?? null,
+      specifics: res.specifics ?? [],
+      raw: res,
+    });
+    return res;
+  }
+
+  private async refreshFitmentFromEbay(args: { sku: string; timeoutMs?: number; lite?: boolean }) {
+    const sku = String(args.sku ?? '').trim();
+    const itemUrl = await this.ebayItemUrlBySku(sku);
+    const res = await this.ebayUrlTest.tradingFitmentByUrl(itemUrl, { timeoutMs: args.timeoutMs, lite: args.lite });
+    await this.ebayTestCache.saveTrading({
+      sku,
+      itemId: res.itemId ?? null,
+      siteId: res.siteId ?? null,
+      totalCount: res.vehicles?.totalCount ?? 0,
+      vehicles: res.vehicles?.items ?? [],
+      rawSample: res.vehicles?.rawSample ?? [],
+      specifics: res.specifics ?? [],
+    });
+    return res;
+  }
+
+  async getEbayOfficialLiveBrowseBySku(args: { sku: string; timeoutMs?: number; refreshMode?: 'background' | null }) {
+    const sku = String(args.sku ?? '').trim();
+    const cached = await this.ebayTestCache.getBrowseBySku(sku);
+    if (cached) {
+      if (args.refreshMode === 'background') {
+        void this.refreshBrowseFromEbay({ sku, timeoutMs: args.timeoutMs }).catch(() => undefined);
+      }
+      return {
+        url: cached.basic.itemWebUrl ?? '',
+        itemId: cached.itemId ?? '',
+        marketplaceId: cached.marketplaceId,
+        basic: cached.basic,
+        specifics: cached.specifics,
+        cached: true,
+        refreshQueued: args.refreshMode === 'background',
+      };
+    }
+
+    const res = await this.refreshBrowseFromEbay({ sku, timeoutMs: args.timeoutMs });
+    return { ...res, cached: false, refreshQueued: false };
+  }
+
+  async getEbayOfficialLiveFitmentBySku(args: { sku: string; timeoutMs?: number; lite?: boolean; refreshMode?: 'background' | null }) {
+    const sku = String(args.sku ?? '').trim();
+    const cached = await this.ebayTestCache.getTradingBySku(sku);
+    if (cached) {
+      if (args.refreshMode === 'background') {
+        void this.refreshFitmentFromEbay({ sku, timeoutMs: args.timeoutMs, lite: args.lite }).catch(() => undefined);
+      }
+      return {
+        url: '',
+        itemId: cached.itemId ?? '',
+        siteId: cached.siteId ?? '',
+        vehicles: cached.vehicles,
+        specifics: cached.specifics,
+        vehiclesError: null,
+        cached: true,
+        refreshQueued: args.refreshMode === 'background',
+      };
+    }
+
+    try {
+      const res = await this.refreshFitmentFromEbay({ sku, timeoutMs: args.timeoutMs, lite: args.lite });
+      return { ...res, vehiclesError: null, cached: false, refreshQueued: false };
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err as { message?: string })?.message ??
+        'Trading API 失败';
+      return {
+        url: '',
+        itemId: '',
+        siteId: '',
+        vehicles: { totalCount: 0, items: [], rawSample: [] as Array<Record<string, string>> },
+        specifics: [],
+        vehiclesError: String(msg),
+        cached: false,
+        refreshQueued: false,
+      };
+    }
+  }
+
+  async getEbayOfficialLiveBySku(sku: string) {
+    const [browseRes, fitmentRes] = await Promise.allSettled([
+      this.getEbayOfficialLiveBrowseBySku({ sku }),
+      this.getEbayOfficialLiveFitmentBySku({ sku, lite: true }),
+    ]);
+
+    const browse = browseRes.status === 'fulfilled' ? browseRes.value : null;
+    const fitment = fitmentRes.status === 'fulfilled' ? fitmentRes.value : null;
+    const vehiclesError =
+      fitment && (fitment as any)?.vehiclesError ? String((fitment as any).vehiclesError) : fitmentRes.status === 'rejected' ? '适配车型加载失败' : null;
+
+    if (!browse && !fitment) {
+      throw new NotFoundException('商品细节与适配车型均加载失败');
+    }
+
+    const normKey = (s: string) =>
+      String(s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+
+    const map = new Map<string, { name: string; value: string }>();
+    for (const it of browse?.specifics ?? []) {
+      const k = normKey(it.name);
+      if (!k) continue;
+      if (!map.has(k)) map.set(k, it);
+    }
+    for (const it of (fitment as any)?.specifics ?? []) {
+      const k = normKey(it.name);
+      if (!k) continue;
+      if (!map.has(k)) map.set(k, it);
+    }
+
+    return {
+      url: browse?.url ?? (fitment as any)?.url ?? '',
+      siteId: (fitment as any)?.siteId ?? '',
+      itemId: browse?.itemId ?? (fitment as any)?.itemId ?? '',
+      marketplaceId: browse?.marketplaceId ?? 'EBAY_US',
+      basic:
+        browse?.basic ??
+        ({
+          title: null,
+          priceValue: null,
+          priceCurrency: null,
+          condition: null,
+          sellerUsername: null,
+          availabilityStatus: null,
+          itemWebUrl: null,
+        } as any),
+      vehicles: (fitment as any)?.vehicles ?? { totalCount: 0, items: [], rawSample: [] },
+      vehiclesError,
+      specifics: Array.from(map.values()),
+    };
   }
 
   async applySkuPricesFromSelection(priceMap: Map<string, string>): Promise<{ updated: number; notFound: number; notFoundSkus: string[] }> {

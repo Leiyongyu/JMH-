@@ -139,7 +139,14 @@ export class EbayUserOAuthService {
     refreshTokenExpiresIn: number | null;
     tokenType: string | null;
   }> {
-    const cleanCode = String(code ?? '').trim();
+    const rawCode = String(code ?? '').trim();
+    let cleanCode = rawCode;
+    try {
+      cleanCode = decodeURIComponent(rawCode);
+    } catch {
+      cleanCode = rawCode;
+    }
+    cleanCode = cleanCode.replace(/\r?\n/g, '').replace(/ /g, '+').trim();
     if (!cleanCode) throw new ServiceUnavailableException('缺少 code');
     const id = this.clientId();
     const secret = this.clientSecret();

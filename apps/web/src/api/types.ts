@@ -217,7 +217,29 @@ export interface EbayTradingGetItemResult {
   marketplaceId: string;
   basic: EbayBrowseBasicInfo;
   vehicles: EbayTradingVehiclesResult;
+  vehiclesError?: string | null;
   specifics: EbayItemSpecificRow[];
+}
+
+export interface EbayOfficialLiveBrowseBySkuResult {
+  url: string;
+  itemId: string;
+  marketplaceId: string;
+  basic: EbayBrowseBasicInfo;
+  specifics: EbayItemSpecificRow[];
+  cached?: boolean;
+  refreshQueued?: boolean;
+}
+
+export interface EbayOfficialLiveFitmentBySkuResult {
+  url: string;
+  itemId: string;
+  siteId: string;
+  vehicles: EbayTradingVehiclesResult;
+  specifics: EbayItemSpecificRow[];
+  vehiclesError?: string | null;
+  cached?: boolean;
+  refreshQueued?: boolean;
 }
 
 export interface PageResult<T> {

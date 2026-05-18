@@ -11,7 +11,7 @@
  Target Server Version : 80045 (8.0.45)
  File Encoding         : 65001
 
- Date: 15/05/2026 16:09:05
+ Date: 18/05/2026 18:32:50
 */
 
 SET NAMES utf8mb4;
@@ -84,6 +84,53 @@ CREATE TABLE `distributor_orders`  (
   UNIQUE INDEX `IDX_f512b017032595d22224a91638`(`order_no` ASC) USING BTREE,
   INDEX `IDX_eee1bfb8d7b82095f667566e2d`(`buyer_user_id` ASC) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+-- ----------------------------
+-- Table structure for ebay_cached_item_details
+-- ----------------------------
+DROP TABLE IF EXISTS `ebay_cached_item_details`;
+CREATE TABLE `ebay_cached_item_details`  (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT,
+  `sku` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `item_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `marketplace_id` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'EBAY_US',
+  `item_web_url` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `title` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `price_value` decimal(14, 2) NULL DEFAULT NULL,
+  `price_currency` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `condition` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `seller_username` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `availability_status` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `specifics_json` json NULL,
+  `raw_json` json NULL,
+  `fetched_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uniq_sku`(`sku` ASC) USING BTREE,
+  INDEX `idx_item_id`(`item_id` ASC) USING BTREE,
+  INDEX `idx_updated_at`(`updated_at` ASC) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for ebay_cached_item_fitments
+-- ----------------------------
+DROP TABLE IF EXISTS `ebay_cached_item_fitments`;
+CREATE TABLE `ebay_cached_item_fitments`  (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT,
+  `sku` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `item_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `site_id` varchar(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `total_count` int NOT NULL DEFAULT 0,
+  `vehicles_json` json NULL,
+  `raw_sample_json` json NULL,
+  `specifics_json` json NULL,
+  `fetched_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uniq_sku`(`sku` ASC) USING BTREE,
+  INDEX `idx_item_id`(`item_id` ASC) USING BTREE,
+  INDEX `idx_updated_at`(`updated_at` ASC) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for ebay_products

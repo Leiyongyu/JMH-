@@ -1,8 +1,8 @@
 import { Alert, Button, Card, Col, Descriptions, Empty, Form, Image, Input, InputNumber, Modal, Row, Skeleton, Space, Tag, Tabs, Typography, App, Table, Select } from 'antd';
 import { ArrowLeftOutlined, ShoppingCartOutlined } from '@ant-design/icons';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { EbayItemSpecificRow, EbayProduct, EbayTradingGetItemResult, EbayTradingVehicleRow, InventoryLine } from '../api/types';
-import { useEffect, useMemo, useState } from 'react';
+import type { EbayItemSpecificRow, EbayOfficialLiveBrowseBySkuResult, EbayOfficialLiveFitmentBySkuResult, EbayProduct, EbayTradingVehicleRow, InventoryLine } from '../api/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { cart } from '../cart/cart';
 import { inventoryApi, ordersApi, productsApi } from '../api/modules';
 
@@ -70,19 +70,6 @@ function normKey(s: string): string {
     .replace(/[^a-z0-9]/g, '');
 }
 
-function pickSpecificValue(rows: EbayItemSpecificRow[], keys: string[]): string | null {
-  const want = keys.map((k) => normKey(k)).filter(Boolean);
-  for (const r of rows) {
-    const k = normKey(r.name);
-    if (!k) continue;
-    if (want.some((w) => k === w || k.includes(w))) {
-      const v = String(r.value ?? '').trim();
-      if (v) return v;
-    }
-  }
-  return null;
-}
-
 type LocationState = { product?: EbayProduct };
 
 export function ProductDetailPage() {
@@ -102,9 +89,19 @@ export function ProductDetailPage() {
   const [invLoading, setInvLoading] = useState(false);
   const [invLines, setInvLines] = useState<InventoryLine[]>([]);
   const [selectedWarehouseCode, setSelectedWarehouseCode] = useState<string | null>(null);
-  const [official, setOfficial] = useState<EbayTradingGetItemResult | null>(null);
-  const [officialLoading, setOfficialLoading] = useState(false);
-  const [officialError, setOfficialError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'detail' | 'fitment'>('detail');
+
+  const [officialBrowse, setOfficialBrowse] = useState<EbayOfficialLiveBrowseBySkuResult | null>(null);
+  const [officialBrowseLoading, setOfficialBrowseLoading] = useState(false);
+  const [officialBrowseError, setOfficialBrowseError] = useState<string | null>(null);
+  const browseReqIdRef = useRef(0);
+  const browseSkuRef = useRef('');
+
+  const [officialFitment, setOfficialFitment] = useState<EbayOfficialLiveFitmentBySkuResult | null>(null);
+  const [officialFitmentLoading, setOfficialFitmentLoading] = useState(false);
+  const [officialFitmentError, setOfficialFitmentError] = useState<string | null>(null);
+  const fitmentReqIdRef = useRef(0);
+  const fitmentSkuRef = useRef('');
 
   useEffect(() => {
     if (!skuParam) return;
@@ -118,22 +115,71 @@ export function ProductDetailPage() {
 
   useEffect(() => {
     if (!skuParam) return;
-    setOfficial(null);
-    setOfficialLoading(true);
-    setOfficialError(null);
+    browseSkuRef.current = skuParam;
+    const reqId = (browseReqIdRef.current += 1);
+    setOfficialBrowse(null);
+    setOfficialBrowseLoading(true);
+    setOfficialBrowseError(null);
+    setOfficialFitment(null);
+    setOfficialFitmentError(null);
+    setOfficialFitmentLoading(false);
     productsApi
-      .officialLiveBySku(skuParam)
-      .then((d) => setOfficial(d ?? null))
+      .officialLiveBrowseBySku(skuParam)
+      .then((d) => {
+        if (browseReqIdRef.current !== reqId) return;
+        if (browseSkuRef.current !== skuParam) return;
+        setOfficialBrowse(d ?? null);
+        setOfficialBrowseError(null);
+      })
       .catch((err: unknown) => {
+        if (browseReqIdRef.current !== reqId) return;
+        if (browseSkuRef.current !== skuParam) return;
         const msg =
           (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
           (err as Error)?.message ??
           '加载失败';
-        setOfficialError(String(msg));
-        setOfficial(null);
+        setOfficialBrowseError(String(msg));
+        setOfficialBrowse(null);
       })
-      .finally(() => setOfficialLoading(false));
+      .finally(() => {
+        if (browseReqIdRef.current !== reqId) return;
+        if (browseSkuRef.current !== skuParam) return;
+        setOfficialBrowseLoading(false);
+      });
   }, [skuParam]);
+
+  useEffect(() => {
+    if (!skuParam) return;
+    if (activeTab !== 'fitment') return;
+    if (officialFitment || officialFitmentLoading) return;
+    fitmentSkuRef.current = skuParam;
+    const reqId = (fitmentReqIdRef.current += 1);
+    setOfficialFitmentLoading(true);
+    setOfficialFitmentError(null);
+    productsApi
+      .officialLiveFitmentBySku(skuParam, { lite: true, refreshMode: 'background' })
+      .then((d) => {
+        if (fitmentReqIdRef.current !== reqId) return;
+        if (fitmentSkuRef.current !== skuParam) return;
+        setOfficialFitment(d ?? null);
+        setOfficialFitmentError(null);
+      })
+      .catch((err: unknown) => {
+        if (fitmentReqIdRef.current !== reqId) return;
+        if (fitmentSkuRef.current !== skuParam) return;
+        const msg =
+          (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+          (err as Error)?.message ??
+          '加载失败';
+        setOfficialFitmentError(String(msg));
+        setOfficialFitment(null);
+      })
+      .finally(() => {
+        if (fitmentReqIdRef.current !== reqId) return;
+        if (fitmentSkuRef.current !== skuParam) return;
+        setOfficialFitmentLoading(false);
+      });
+  }, [skuParam, activeTab, officialFitment, officialFitmentLoading]);
 
   useEffect(() => {
     if (!skuParam) return;
@@ -161,42 +207,9 @@ export function ProductDetailPage() {
       .finally(() => setInvLoading(false));
   }, [skuParam]);
 
-  if (!skuParam) {
-    return (
-      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
-        <Empty description="无效的商品 SKU" />
-        <div style={{ textAlign: 'center', marginTop: 12 }}>
-          <Button type="primary" onClick={() => navigate('/products', { replace: true })}>
-            返回商品列表
-          </Button>
-        </div>
-      </Card>
-    );
-  }
-
-  if (loading && !product) {
-    return (
-      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
-        <Skeleton active paragraph={{ rows: 6 }} />
-      </Card>
-    );
-  }
-
-  if (!product) {
-    return (
-      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
-        <Empty description="未找到该商品（可能已下架或未同步）" />
-        <div style={{ textAlign: 'center', marginTop: 12 }}>
-          <Button type="primary" onClick={() => navigate('/products', { replace: true })}>
-            返回商品列表
-          </Button>
-        </div>
-      </Card>
-    );
-  }
-
-  const rmbPrice = product.rmbPrice ? Number(product.rmbPrice) : null;
-  const currency = String(product.currency || '').trim().toUpperCase() || 'EUR';
+  const invalidSku = !skuParam;
+  const rmbPrice = product?.rmbPrice ? Number(product.rmbPrice) : null;
+  const currency = String(product?.currency || '').trim().toUpperCase() || 'EUR';
 
   const fxRmbPer = (c: string) => {
     const env = import.meta.env as unknown as Record<string, string | undefined>;
@@ -213,12 +226,12 @@ export function ProductDetailPage() {
       const rate = fxRmbPer(currency);
       if (rate) return rmbPrice / rate;
     }
-    return Number(product.price || 0);
+    return Number(product?.price || 0);
   })();
 
   const priceText = `${foreignPrice.toFixed(2)} ${currency}${rmbPrice !== null ? ` / ${rmbPrice.toFixed(2)} RMB` : ''}`;
-  const raw = (product.rawPayload ?? {}) as Record<string, unknown>;
-  const imgUrls = useMemo(() => pickImageUrls(product), [product]);
+  const raw = ((product?.rawPayload ?? {}) as Record<string, unknown>) ?? {};
+  const imgUrls = useMemo(() => (product ? pickImageUrls(product) : [PLACEHOLDER_IMG]), [product]);
 
   useEffect(() => {
     setActiveImg(imgUrls[0] ?? PLACEHOLDER_IMG);
@@ -269,8 +282,8 @@ export function ProductDetailPage() {
     if (invQty !== null && invQty !== undefined && Number.isFinite(Number(invQty))) {
       return Math.max(0, Number(invQty));
     }
-    return Math.max(0, Number(product.stockQty ?? 0));
-  }, [product.stockQty, selectedInv?.availableQty]);
+    return Math.max(0, Number(product?.stockQty ?? 0));
+  }, [product?.stockQty, selectedInv?.availableQty]);
 
   const lowStock = stockQtyForOrder < 10;
   const outOfStock = stockQtyForOrder <= 0;
@@ -299,44 +312,75 @@ export function ProductDetailPage() {
     );
   }, [invLoading, invLines, selectedInv, selectedWarehouseCode]);
 
-  const officialSpecifics = official?.specifics ?? [];
-  const officialVehicleItems = official?.vehicles?.items ?? [];
+  const officialSpecifics = officialBrowse?.specifics ?? [];
+  const officialVehicleItems = officialFitment?.vehicles?.items ?? [];
+  const officialVehicleError = officialFitment?.vehiclesError ?? null;
 
   const specItems = useMemo(() => {
     const items = [
-      { key: 'sku', label: 'SKU', children: product.sku },
-      { key: 'localSku', label: '本地 SKU', children: localSku ?? '—' },
+      { key: 'sku', label: 'SKU', children: product?.sku ?? '—' },
       { key: 'site', label: '发货仓', children: warehouseNode },
       { key: 'localName', label: '本地名称', children: localName ?? '—' },
-      { key: 'gtin', label: 'GTIN/EAN', children: pickSpecificValue(officialSpecifics, ['GTIN', 'EAN']) ?? '—' },
-      { key: 'condition', label: '物品状况', children: official?.basic?.condition ?? '—' },
-      { key: 'seller', label: '卖家', children: official?.basic?.sellerUsername ?? '—' },
-      { key: 'lastSync', label: '最后同步', children: product.syncedAt ?? '—' },
+      { key: 'lastSync', label: '最后同步', children: product?.syncedAt ?? '—' },
     ];
     return items;
   }, [
     itemId,
     localName,
     localSku,
-    official?.basic?.condition,
-    official?.basic?.sellerUsername,
+    officialBrowse?.basic?.condition,
+    officialBrowse?.basic?.sellerUsername,
     officialSpecifics,
-    product.sku,
-    product.syncedAt,
+    product?.sku,
+    product?.syncedAt,
     warehouseNode,
   ]);
 
   const detailRows = useMemo(() => {
-    if (officialLoading) return null;
+    if (officialBrowseLoading) return null;
     if (officialSpecifics.length) return officialSpecifics;
     return null;
-  }, [officialLoading, officialSpecifics, product?.sku]);
+  }, [officialBrowseLoading, officialSpecifics, product?.sku]);
 
   const vehicleRows = useMemo(() => {
-    if (officialLoading) return null;
+    if (officialFitmentLoading) return null;
     if (officialVehicleItems.length) return officialVehicleItems;
     return null;
-  }, [officialLoading, officialVehicleItems, product?.sku]);
+  }, [officialFitmentLoading, officialVehicleItems, product?.sku]);
+
+  if (invalidSku) {
+    return (
+      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
+        <Empty description="无效的商品 SKU" />
+        <div style={{ textAlign: 'center', marginTop: 12 }}>
+          <Button type="primary" onClick={() => navigate('/products', { replace: true })}>
+            返回商品列表
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
+  if (loading && !product) {
+    return (
+      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
+        <Skeleton active paragraph={{ rows: 6 }} />
+      </Card>
+    );
+  }
+
+  if (!product) {
+    return (
+      <Card variant="borderless" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
+        <Empty description="未找到该商品（可能已下架或未同步）" />
+        <div style={{ textAlign: 'center', marginTop: 12 }}>
+          <Button type="primary" onClick={() => navigate('/products', { replace: true })}>
+            返回商品列表
+          </Button>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -423,7 +467,6 @@ export function ProductDetailPage() {
                 <Typography.Title level={4} style={{ margin: 0 }}>
                   {product.title || '（无标题）'}
                 </Typography.Title>
-                <Typography.Text type="secondary">SKU：{product.sku}</Typography.Text>
               </div>
               <Descriptions size="small" column={2} items={specItems} />
             </Space>
@@ -474,14 +517,16 @@ export function ProductDetailPage() {
 
       <Card variant="borderless" styles={{ body: { padding: 16 } }} style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
         <Tabs
+          activeKey={activeTab}
+          onChange={(k) => setActiveTab(k === 'fitment' ? 'fitment' : 'detail')}
           items={[
             {
               key: 'detail',
               label: '商品细节',
-              children: officialLoading ? (
+              children: officialBrowseLoading ? (
                 <Skeleton active paragraph={{ rows: 6 }} />
-              ) : officialError ? (
-                <Alert type="error" showIcon message="加载失败" description={officialError} />
+              ) : officialBrowseError ? (
+                <Alert type="error" showIcon message="加载失败" description={officialBrowseError} />
               ) : detailRows ? (
                 <Table<EbayItemSpecificRow>
                   rowKey={(r) => `${normKey(r.name)}:${normKey(r.value)}`}
@@ -501,10 +546,12 @@ export function ProductDetailPage() {
             {
               key: 'fitment',
               label: '适配车型',
-              children: officialLoading ? (
+              children: officialFitmentLoading ? (
                 <Skeleton active paragraph={{ rows: 6 }} />
-              ) : officialError ? (
-                <Alert type="error" showIcon message="加载失败" description={officialError} />
+              ) : officialFitmentError ? (
+                <Alert type="error" showIcon message="加载失败" description={officialFitmentError} />
+              ) : officialVehicleError ? (
+                <Alert type="warning" showIcon message="适配车型加载失败" description={officialVehicleError} />
               ) : vehicleRows ? (
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Table<EbayTradingVehicleRow>

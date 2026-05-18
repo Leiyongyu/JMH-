@@ -1,6 +1,6 @@
 import { api } from './client';
 
-import type { AdminUser, AuthUser, DistributorOrder, EbayOfficialProductBundle, EbayProduct, EbayTradingGetItemResult, InventoryLine, InventorySummary, PageResult, SyncRun } from './types';
+import type { AdminUser, AuthUser, DistributorOrder, EbayOfficialLiveBrowseBySkuResult, EbayOfficialLiveFitmentBySkuResult, EbayOfficialProductBundle, EbayProduct, EbayTradingGetItemResult, InventoryLine, InventorySummary, PageResult, SyncRun } from './types';
 
 export const authApi = {
   login: (account: string, password: string) =>
@@ -35,7 +35,23 @@ export const productsApi = {
   officialBySku: (sku: string) =>
     api.get<EbayOfficialProductBundle>(`/products/ebay/${encodeURIComponent(sku)}/official`).then((r) => r.data),
   officialLiveBySku: (sku: string) =>
-    api.get<EbayTradingGetItemResult>(`/products/ebay/${encodeURIComponent(sku)}/official-live`).then((r) => r.data),
+    api
+      .get<EbayTradingGetItemResult>(`/products/ebay/${encodeURIComponent(sku)}/official-live`, { timeout: 150_000 })
+      .then((r) => r.data),
+  officialLiveBrowseBySku: (sku: string, timeoutMs?: number) =>
+    api
+      .get<EbayOfficialLiveBrowseBySkuResult>(`/products/ebay/${encodeURIComponent(sku)}/official-live/browse`, {
+        params: { timeoutMs },
+        timeout: 150_000,
+      })
+      .then((r) => r.data),
+  officialLiveFitmentBySku: (sku: string, args?: { timeoutMs?: number; lite?: boolean; refreshMode?: 'background' }) =>
+    api
+      .get<EbayOfficialLiveFitmentBySkuResult>(`/products/ebay/${encodeURIComponent(sku)}/official-live/fitment`, {
+        params: { timeoutMs: args?.timeoutMs, lite: args?.lite, refreshMode: args?.refreshMode },
+        timeout: 150_000,
+      })
+      .then((r) => r.data),
 };
 
 export const ordersApi = {
@@ -122,5 +138,4 @@ export const adminApi = {
       }>('/admin/products/ebay/import/price-xlsx', fd)
       .then((r) => r.data);
   },
-
 };

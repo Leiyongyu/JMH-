@@ -135,7 +135,10 @@ export class EbayTradingService {
   }
 
   async getItemByUrl(url: string) {
-    const cleanUrl = String(url || '').trim().replace(/^`+|`+$/g, '');
+    let cleanUrl = String(url || '');
+    cleanUrl = cleanUrl.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+    cleanUrl = cleanUrl.replace(/^[`"'“”]+|[`"'“”]+$/g, '').trim();
+    cleanUrl = cleanUrl.replace(/`/g, '').trim();
     if (!cleanUrl) throw new BadRequestException('请输入链接');
 
     const appAccessToken = await this.oauth.getAppAccessToken();
@@ -148,8 +151,38 @@ export class EbayTradingService {
     const siteId = this.siteIdFromUrl(cleanUrl);
     const marketplaceId = this.marketplaceIdFromUrl(cleanUrl);
 
-    const browse = await this.fetchBrowseBasic({ itemId, marketplaceId, token: appAccessToken });
-    const vehicles = await this.fetchTradingCompat({ itemId, siteId, devId, appId, certId, token: userAccessToken });
+    const tradingCtrl = new AbortController();
+    const tradingTimer = setTimeout(() => tradingCtrl.abort(), 25_000);
+
+    const browsePromise = this.fetchBrowseBasic({ itemId, marketplaceId, token: appAccessToken });
+    let vehicles: {
+      totalCount: number;
+      items: VehicleRow[];
+      rawSample: Array<Record<string, string>>;
+      specifics: ItemSpecificRow[];
+    } = { totalCount: 0, items: [], rawSample: [], specifics: [] };
+    let vehiclesError: string | null = null;
+    const tradingPromise = this.fetchTradingCompat({
+      itemId,
+      siteId,
+      devId,
+      appId,
+      certId,
+      token: userAccessToken,
+      signal: tradingCtrl.signal,
+    }).catch((err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { message?: unknown } } })?.response?.data?.message ??
+        (err as { message?: unknown })?.message ??
+        'Trading API 调用失败';
+      vehiclesError = typeof msg === 'string' ? msg : JSON.stringify(msg);
+      return { totalCount: 0, items: [], rawSample: [], specifics: [] } as typeof vehicles;
+    });
+
+    const [browse, vehiclesResult] = await Promise.all([browsePromise, tradingPromise]).finally(() => {
+      clearTimeout(tradingTimer);
+    });
+    vehicles = vehiclesResult;
 
     const specificsMap = new Map<string, ItemSpecificRow>();
     for (const it of browse.specifics) {
@@ -170,6 +203,7 @@ export class EbayTradingService {
       marketplaceId,
       basic: browse,
       vehicles,
+      vehiclesError,
       specifics: Array.from(specificsMap.values()),
     };
   }
@@ -185,47 +219,56 @@ export class EbayTradingService {
     specifics: ItemSpecificRow[];
   }> {
     const url = `${this.browseOrigin()}/buy/browse/v1/item/get_item_by_legacy_id`;
-    try {
-      const resp = await axios.get(url, {
-        timeout: 20_000,
-        ...ebayAxiosConnectionOptions(this.config),
-        params: { legacy_item_id: args.itemId, fieldgroups: 'PRODUCT' },
-        headers: {
-          Authorization: `Bearer ${args.token}`,
-          'X-EBAY-C-MARKETPLACE-ID': args.marketplaceId,
-          Accept: 'application/json',
-        },
-      });
-      const data = resp.data as any;
-      const price = (data?.price ?? {}) as Record<string, unknown>;
-      const seller = (data?.seller ?? {}) as Record<string, unknown>;
-      const availability = (data?.availability ?? {}) as Record<string, unknown>;
-      const aspects = Array.isArray(data?.localizedAspects) ? data.localizedAspects : [];
-      const specifics: ItemSpecificRow[] = aspects
-        .map((a: any) => ({ name: this.toText(a?.name), value: this.toText(a?.value) }))
-        .filter((x: any) => Boolean(x?.name) && Boolean(x?.value))
-        .map((x: any) => ({ name: String(x.name), value: String(x.value) }));
-      return {
-        title: this.toText(data?.title),
-        priceValue: this.toText(price?.value),
-        priceCurrency: this.toText(price?.currency),
-        condition: this.toText(data?.condition),
-        sellerUsername: this.toText(seller?.username),
-        availabilityStatus: this.toText(availability?.availabilityStatus),
-        itemWebUrl: this.toText(data?.itemWebUrl),
-        specifics,
-      };
-    } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      const data = (err as { response?: { data?: unknown } })?.response?.data;
-      if (status === 401) throw new BadRequestException('Browse API OAuth 失败（请检查 eBay App Token / OAuth scopes 配置）');
-      if (status === 404) throw new BadRequestException('Browse API 未找到商品（ItemID 不存在或 marketplaceId 不匹配）');
-      if (status === 429) throw new BadRequestException('Browse API 限流（429）');
-      if (typeof status === 'number') {
-        throw new BadRequestException(`Browse API 失败：HTTP ${status}${data ? `（${JSON.stringify(data).slice(0, 300)}）` : ''}`);
+    const timeouts = [90_000];
+    let lastErr: unknown = null;
+    for (const timeout of timeouts) {
+      try {
+        const resp = await axios.get(url, {
+          timeout,
+          ...ebayAxiosConnectionOptions(this.config),
+          params: { legacy_item_id: args.itemId, fieldgroups: 'PRODUCT' },
+          headers: {
+            Authorization: `Bearer ${args.token}`,
+            'X-EBAY-C-MARKETPLACE-ID': args.marketplaceId,
+            Accept: 'application/json',
+          },
+        });
+        const data = resp.data as any;
+        const price = (data?.price ?? {}) as Record<string, unknown>;
+        const seller = (data?.seller ?? {}) as Record<string, unknown>;
+        const availability = (data?.availability ?? {}) as Record<string, unknown>;
+        const aspects = Array.isArray(data?.localizedAspects) ? data.localizedAspects : [];
+        const specifics: ItemSpecificRow[] = aspects
+          .map((a: any) => ({ name: this.toText(a?.name), value: this.toText(a?.value) }))
+          .filter((x: any) => Boolean(x?.name) && Boolean(x?.value))
+          .map((x: any) => ({ name: String(x.name), value: String(x.value) }));
+        return {
+          title: this.toText(data?.title),
+          priceValue: this.toText(price?.value),
+          priceCurrency: this.toText(price?.currency),
+          condition: this.toText(data?.condition),
+          sellerUsername: this.toText(seller?.username),
+          availabilityStatus: this.toText(availability?.availabilityStatus),
+          itemWebUrl: this.toText(data?.itemWebUrl),
+          specifics,
+        };
+      } catch (err: unknown) {
+        lastErr = err;
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        const data = (err as { response?: { data?: unknown } })?.response?.data;
+        if (status === 401) throw new BadRequestException('Browse API OAuth 失败（请检查 eBay App Token / OAuth scopes 配置）');
+        if (status === 404) throw new BadRequestException('Browse API 未找到商品（ItemID 不存在或 marketplaceId 不匹配）');
+        if (status === 429) throw new BadRequestException('Browse API 限流（429）');
+        if (typeof status === 'number') {
+          throw new BadRequestException(`Browse API 失败：HTTP ${status}${data ? `（${JSON.stringify(data).slice(0, 300)}）` : ''}`);
+        }
       }
-      throw new BadRequestException('Browse API 失败：网络错误');
     }
+    const errCode = (lastErr as { code?: string })?.code;
+    const errMsg = (lastErr as { message?: string })?.message;
+    throw new BadRequestException(
+      `Browse API 失败：网络错误${errCode || errMsg ? `（${[errCode, errMsg].filter(Boolean).join(' / ')}）` : ''}`,
+    );
   }
 
   private async fetchTradingCompat(args: {
@@ -235,6 +278,7 @@ export class EbayTradingService {
     appId: string;
     certId: string;
     token: string;
+    signal?: AbortSignal;
   }): Promise<{
     totalCount: number;
     items: VehicleRow[];
@@ -256,6 +300,7 @@ export class EbayTradingService {
       resp = await axios.post(this.apiUrl(), requestXml, {
         timeout: 60_000,
         ...ebayAxiosConnectionOptions(this.config),
+        signal: args.signal,
         headers: {
           'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
           'X-EBAY-API-DEV-NAME': args.devId,

@@ -38,6 +38,43 @@ export class ProductsController {
     return this.service.getEbayOfficialLiveBySku(decodeURIComponent(String(sku ?? '')));
   }
 
+  @ApiOperation({ summary: 'eBay 官方数据（实时，从 item_url 调用 Browse；用于商品细节）' })
+  @Get('ebay/:sku/official-live/browse')
+  officialLiveBrowseBySku(
+    @Param('sku') sku: string,
+    @Query('timeoutMs') timeoutMs?: string,
+    @Query('refreshMode') refreshMode?: string,
+  ) {
+    const s = decodeURIComponent(String(sku ?? ''));
+    const timeout = Number(timeoutMs);
+    const rm = String(refreshMode ?? '').trim().toLowerCase();
+    return this.service.getEbayOfficialLiveBrowseBySku({
+      sku: s,
+      timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
+      refreshMode: rm === 'background' ? 'background' : null,
+    });
+  }
+
+  @ApiOperation({ summary: 'eBay 官方数据（实时，从 item_url 调用 Trading Fitment；用于适配车型）' })
+  @Get('ebay/:sku/official-live/fitment')
+  officialLiveFitmentBySku(
+    @Param('sku') sku: string,
+    @Query('timeoutMs') timeoutMs?: string,
+    @Query('lite') lite?: string,
+    @Query('refreshMode') refreshMode?: string,
+  ) {
+    const s = decodeURIComponent(String(sku ?? ''));
+    const timeout = Number(timeoutMs);
+    const liteBool = String(lite ?? '').trim().toLowerCase() === 'true' || String(lite ?? '').trim() === '1';
+    const rm = String(refreshMode ?? '').trim().toLowerCase();
+    return this.service.getEbayOfficialLiveFitmentBySku({
+      sku: s,
+      timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
+      lite: liteBool,
+      refreshMode: rm === 'background' ? 'background' : null,
+    });
+  }
+
   @ApiOperation({ summary: 'eBay 商品详情（仅基于领星同步+SKU白名单，多图聚合）' })
   @Get('ebay/:sku')
   bySku(@Param('sku') sku: string) {

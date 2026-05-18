@@ -47,36 +47,48 @@ export class EbayOAuthService {
     body.set('grant_type', 'client_credentials');
     body.set('scope', this.scopes());
 
-    try {
-      const origin = this.env() === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
-      const resp = await axios.post(
-        `${origin}/identity/v1/oauth2/token`,
-        body.toString(),
-        {
-          timeout: 15_000,
-          ...ebayAxiosConnectionOptions(this.config),
-          headers: {
-            Authorization: `Basic ${basic}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
+    const origin = this.env() === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
+    const timeouts = [15_000, 30_000];
+    let lastErr: unknown = null;
+    for (const timeout of timeouts) {
+      try {
+        const resp = await axios.post(
+          `${origin}/identity/v1/oauth2/token`,
+          body.toString(),
+          {
+            timeout,
+            ...ebayAxiosConnectionOptions(this.config),
+            headers: {
+              Authorization: `Basic ${basic}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
           },
-        },
-      );
+        );
 
-      const token = String(resp.data?.access_token ?? '').trim();
-      const expiresIn = Number(resp.data?.expires_in ?? 0);
-      if (!token || !Number.isFinite(expiresIn) || expiresIn <= 0) {
-        throw new ServiceUnavailableException('eBay OAuth 返回异常');
+        const token = String(resp.data?.access_token ?? '').trim();
+        const expiresIn = Number(resp.data?.expires_in ?? 0);
+        if (!token || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+          throw new ServiceUnavailableException('eBay OAuth 返回异常');
+        }
+        this.cache = { token, expiresAtMs: now + expiresIn * 1000 };
+        this.logger.log(`eBay OAuth token refreshed (expiresIn=${expiresIn}s)`);
+        return token;
+      } catch (err: unknown) {
+        lastErr = err;
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status) break;
       }
-      this.cache = { token, expiresAtMs: now + expiresIn * 1000 };
-      this.logger.log(`eBay OAuth token refreshed (expiresIn=${expiresIn}s)`);
-      return token;
-    } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      const msg = (err as { response?: { data?: { error_description?: string; error?: string } } })?.response?.data;
-      const hint = msg?.error_description || msg?.error;
-      throw new ServiceUnavailableException(
-        `eBay OAuth 获取失败${status ? `：HTTP ${status}` : ''}${hint ? `（${hint}）` : ''}`,
-      );
     }
+
+    const status = (lastErr as { response?: { status?: number } })?.response?.status;
+    const msg = (lastErr as { response?: { data?: { error_description?: string; error?: string } } })?.response?.data;
+    const hint = msg?.error_description || msg?.error;
+    const errCode = (lastErr as { code?: string })?.code;
+    const errMsg = (lastErr as { message?: string })?.message;
+    throw new ServiceUnavailableException(
+      `eBay OAuth 获取失败${status ? `：HTTP ${status}` : ''}${hint ? `（${hint}）` : ''}${
+        !status && (errCode || errMsg) ? `（${[errCode, errMsg].filter(Boolean).join(' / ')}）` : ''
+      }`,
+    );
   }
 }

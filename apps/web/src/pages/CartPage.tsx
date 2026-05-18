@@ -16,7 +16,6 @@ export function CartPage() {
   const [addrForm] = Form.useForm();
 
   const total = items.reduce((sum, it) => sum + Number(it.unitPrice) * it.qty, 0);
-  const currency = items[0]?.currency ?? 'USD';
 
   const submit = async () => {
     if (items.length === 0) {
@@ -86,7 +85,7 @@ export function CartPage() {
             {
               title: '单价',
               width: 140,
-              render: (_: unknown, r: CartItem) => `${r.currency} ${r.unitPrice}`,
+              render: (_: unknown, r: CartItem) => `${Number(r.unitPrice).toFixed(2)}`,
             },
             {
               title: '数量',
@@ -99,7 +98,7 @@ export function CartPage() {
               title: '小计',
               width: 140,
               render: (_: unknown, r: CartItem) =>
-                `${r.currency} ${(Number(r.unitPrice) * r.qty).toFixed(2)}`,
+                `${(Number(r.unitPrice) * r.qty).toFixed(2)}`,
             },
             {
               title: '操作',
@@ -126,7 +125,7 @@ export function CartPage() {
           />
           <Space style={{ width: '100%', justifyContent: 'space-between' }}>
             <Typography.Text strong>
-              合计：{currency} {total.toFixed(2)}
+              合计：{total.toFixed(2)}
             </Typography.Text>
             <Space>
               <Button onClick={() => cart.clear()}>清空购物车</Button>
