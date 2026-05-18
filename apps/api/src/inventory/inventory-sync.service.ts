@@ -100,7 +100,7 @@ export class InventorySyncService {
     const getCfg = (key: string): string => this.config.get<string>(key)?.trim() || process.env[key]?.trim() || '';
     const apiPath = getCfg('LINGXING_INVENTORY_PATH') || '/erp/sc/routing/data/local_inventory/inventoryDetails';
     const pageSize = Number(getCfg('LINGXING_INVENTORY_PAGE_SIZE') || '200');
-    const wid = getCfg('LINGXING_INVENTORY_WID');
+    const widOverride = getCfg('LINGXING_INVENTORY_WID');
     const skuFilter = getCfg('LINGXING_INVENTORY_SKU');
     await this.warehousesSync.run('inventory-sync');
     const overseas = await this.warehouses.listOverseas(5000);
@@ -109,7 +109,24 @@ export class InventorySyncService {
       warehouseNameMap[String(w.wid)] = String(w.name ?? '').trim();
     }
 
-    this.logger.log(`库存同步开始: path=${apiPath}, wid=${wid || '(无)'}`);
+    const activeWids = await this.warehouses.listActiveWids(20000);
+    const activeWidSet = new Set(activeWids.map((x) => String(x)));
+    const resolvedWids = (() => {
+      const raw = String(widOverride ?? '').trim();
+      if (!raw) return activeWids.map((x) => String(x));
+      const parts = raw.split(',').map((x) => x.trim()).filter(Boolean);
+      const filtered = parts.filter((x) => activeWidSet.has(x));
+      return filtered.length > 0 ? filtered : activeWids.map((x) => String(x));
+    })();
+
+    if (resolvedWids.length === 0) {
+      await this.sync.finish(run, { status: 'SUCCESS', successCount: 0 });
+      this.logger.warn('库存同步跳过：lingxing_warehouses 无可用 wid');
+      return;
+    }
+
+    const wid = resolvedWids.join(',');
+    this.logger.log(`库存同步开始: path=${apiPath}, widCount=${resolvedWids.length}`);
     const syncedAt = new Date();
     let offset = 0;
     let success = 0;
@@ -123,7 +140,7 @@ export class InventorySyncService {
           method: 'POST',
           path: apiPath,
           body: {
-            wid: wid || undefined,
+            wid,
             offset,
             length: pageSize,
             sku: skuFilter || undefined,

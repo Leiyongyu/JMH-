@@ -1,4 +1,4 @@
-import { Button, Card, Col, Descriptions, Empty, Form, Image, Input, InputNumber, Modal, Row, Skeleton, Space, Tag, Tabs, Typography, App, Table, Select } from 'antd';
+import { Alert, Button, Card, Col, Descriptions, Empty, Form, Image, Input, InputNumber, Modal, Row, Skeleton, Space, Tag, Tabs, Typography, App, Table, Select } from 'antd';
 import { ArrowLeftOutlined, ShoppingCartOutlined } from '@ant-design/icons';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { EbayItemSpecificRow, EbayProduct, EbayTradingGetItemResult, EbayTradingVehicleRow, InventoryLine } from '../api/types';
@@ -104,6 +104,7 @@ export function ProductDetailPage() {
   const [selectedWarehouseCode, setSelectedWarehouseCode] = useState<string | null>(null);
   const [official, setOfficial] = useState<EbayTradingGetItemResult | null>(null);
   const [officialLoading, setOfficialLoading] = useState(false);
+  const [officialError, setOfficialError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!skuParam) return;
@@ -119,10 +120,18 @@ export function ProductDetailPage() {
     if (!skuParam) return;
     setOfficial(null);
     setOfficialLoading(true);
+    setOfficialError(null);
     productsApi
       .officialLiveBySku(skuParam)
       .then((d) => setOfficial(d ?? null))
-      .catch(() => setOfficial(null))
+      .catch((err: unknown) => {
+        const msg =
+          (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+          (err as Error)?.message ??
+          '加载失败';
+        setOfficialError(String(msg));
+        setOfficial(null);
+      })
       .finally(() => setOfficialLoading(false));
   }, [skuParam]);
 
@@ -471,6 +480,8 @@ export function ProductDetailPage() {
               label: '商品细节',
               children: officialLoading ? (
                 <Skeleton active paragraph={{ rows: 6 }} />
+              ) : officialError ? (
+                <Alert type="error" showIcon message="加载失败" description={officialError} />
               ) : detailRows ? (
                 <Table<EbayItemSpecificRow>
                   rowKey={(r) => `${normKey(r.name)}:${normKey(r.value)}`}
@@ -492,6 +503,8 @@ export function ProductDetailPage() {
               label: '适配车型',
               children: officialLoading ? (
                 <Skeleton active paragraph={{ rows: 6 }} />
+              ) : officialError ? (
+                <Alert type="error" showIcon message="加载失败" description={officialError} />
               ) : vehicleRows ? (
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Table<EbayTradingVehicleRow>

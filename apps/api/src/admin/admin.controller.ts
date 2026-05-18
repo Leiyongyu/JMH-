@@ -32,6 +32,7 @@ import { WarehousesService } from '../warehouses/warehouses.service';
 import { WarehousesSyncService } from '../warehouses/warehouses-sync.service';
 import { LingxingOrderStatusSyncService } from '../orders/lingxing-order-status-sync.service';
 import { OrdersService } from '../orders/orders.service';
+import { EbayUserOAuthService } from '../ebay/ebay-user-oauth.service';
 import ExcelJS from 'exceljs';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -52,6 +53,7 @@ export class AdminController {
     private readonly products: ProductsService,
     private readonly lingxingOrderStatusSync: LingxingOrderStatusSyncService,
     private readonly orders: OrdersService,
+    private readonly ebayUserOAuth: EbayUserOAuthService,
     private readonly sync: SyncService,
   ) {}
 
@@ -117,6 +119,27 @@ export class AdminController {
     const run = await this.sync.getById(id);
     if (!run) throw new NotFoundException('未找到同步记录');
     return run;
+  }
+
+  @ApiOperation({ summary: 'eBay OAuth：生成授权链接（用于获取 refresh token）' })
+  @Get('ebay/oauth/authorize-url')
+  ebayAuthorizeUrl(@Query('state') state?: string) {
+    return this.ebayUserOAuth.buildAuthorizeUrl({ state });
+  }
+
+  @ApiOperation({ summary: 'eBay OAuth：查看 refresh token 配置状态' })
+  @Get('ebay/oauth/status')
+  ebayOAuthStatus() {
+    return this.ebayUserOAuth.getRefreshTokenStatus();
+  }
+
+  @ApiOperation({ summary: 'eBay OAuth：用 code 换取 access/refresh token' })
+  @HttpCode(200)
+  @Post('ebay/oauth/exchange')
+  ebayExchangeCode(@Body() body: { code?: string }) {
+    const code = String(body?.code ?? '').trim();
+    if (!code) throw new BadRequestException('缺少 code');
+    return this.ebayUserOAuth.exchangeCode(code);
   }
 
   @ApiOperation({ summary: '管理员：领星海外仓列表（从本地数据库读取）' })

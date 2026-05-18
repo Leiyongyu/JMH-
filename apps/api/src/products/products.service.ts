@@ -97,41 +97,52 @@ export class ProductsService {
     const page = Math.max(1, Number(q.page ?? 1));
     const pageSize = Math.min(100, Math.max(1, Number(q.pageSize ?? 20)));
     const kw = q.keyword?.trim();
+    const kwNorm = kw ? kw.trim().toLowerCase() : '';
     const order = String(q.sortOrder ?? 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
     const sortBy = q.sortBy ?? 'stockQty';
     const whereParts: string[] = [];
     const whereParams: unknown[] = [];
     if (kw) {
-      whereParts.push('(LOWER(s.sku) = LOWER(?) OR LOWER(COALESCE(p.title, \'\')) LIKE LOWER(?))');
-      whereParams.push(kw, `%${kw}%`);
+      whereParts.push(`(
+        (p.sku_norm COLLATE utf8mb4_unicode_ci) LIKE (? COLLATE utf8mb4_unicode_ci)
+        OR LOWER(COALESCE(p.title, '')) LIKE LOWER(?)
+      )`);
+      whereParams.push(`%${kwNorm}%`, `%${kw}%`);
     }
     const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
     const sortableMap: Record<string, string> = {
       stockQty: 'COALESCE(inv.availableQty, 0)',
       price: 'CAST(COALESCE(s.price, 0) AS DECIMAL(14,2))',
-      sku: 's.sku',
-      syncedAt: 'COALESCE(p.updated_at, p.synced_at, s.updated_at)',
+      sku: 'p.sku',
+      syncedAt: 'COALESCE(p.updated_at, p.synced_at)',
     };
     const sortable = sortableMap[String(sortBy)] ?? sortableMap.stockQty;
-    const orderSql = `${sortable} ${order}, s.sku ASC`;
+    const orderSql = `${sortable} ${order}, p.sku ASC`;
 
     const totalRow = await this.ds.query(
       `
       SELECT COUNT(1) AS c
-      FROM ebay_sku_price_selections s
+      FROM (
+        SELECT
+          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+          MAX(COALESCE(price, 0)) AS price
+        FROM ebay_sku_price_selections
+        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
+      ) s
       INNER JOIN (
         SELECT *
         FROM (
           SELECT
             p.*,
             LOWER(TRIM(p.sku)) AS sku_norm,
+            SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) AS prefix_norm,
             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
           FROM ebay_products p
         ) t
         WHERE t.rn = 1
       ) p
-        ON p.sku_norm COLLATE utf8mb4_unicode_ci = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
+        ON p.prefix_norm COLLATE utf8mb4_unicode_ci = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
       ${whereSql}
       `,
       whereParams,
@@ -143,7 +154,7 @@ export class ProductsService {
       `
       SELECT
         p.id AS id,
-        TRIM(s.sku) AS sku,
+        TRIM(p.sku) AS sku,
         p.title AS title,
         COALESCE(p.item_url, '') AS itemUrl,
         COALESCE(p.status, 'ACTIVE') AS status,
@@ -152,20 +163,27 @@ export class ProductsService {
         COALESCE(NULLIF(TRIM(p.currency), ''), 'USD') AS currency,
         CAST(COALESCE(s.price, 0) AS CHAR) AS rmbPrice,
         COALESCE(inv.availableQty, 0) AS stockQty,
-        COALESCE(p.updated_at, p.synced_at, s.updated_at) AS syncedAt
-      FROM ebay_sku_price_selections s
+        COALESCE(p.updated_at, p.synced_at) AS syncedAt
+      FROM (
+        SELECT
+          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+          MAX(COALESCE(price, 0)) AS price
+        FROM ebay_sku_price_selections
+        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
+      ) s
       INNER JOIN (
         SELECT *
         FROM (
           SELECT
             p.*,
             LOWER(TRIM(p.sku)) AS sku_norm,
+            SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) AS prefix_norm,
             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
           FROM ebay_products p
         ) t
         WHERE t.rn = 1
       ) p
-        ON p.sku_norm COLLATE utf8mb4_unicode_ci = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
+        ON p.prefix_norm COLLATE utf8mb4_unicode_ci = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
       LEFT JOIN (
         SELECT sku, SUM(available_qty) AS availableQty
         FROM inventory_lines
@@ -174,7 +192,7 @@ export class ProductsService {
           AND TRIM(warehouse_name) <> ''
         GROUP BY sku
       ) inv
-        ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
+        ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (p.sku_norm COLLATE utf8mb4_unicode_ci)
       ${whereSql}
       ORDER BY ${orderSql}
       LIMIT ? OFFSET ?
@@ -270,7 +288,7 @@ export class ProductsService {
       `
       SELECT
         p.id AS id,
-        TRIM(s.sku) AS sku,
+        TRIM(p.sku) AS sku,
         p.title AS title,
         COALESCE(p.item_url, '') AS itemUrl,
         COALESCE(p.status, 'ACTIVE') AS status,
@@ -279,10 +297,16 @@ export class ProductsService {
         COALESCE(NULLIF(TRIM(p.currency), ''), 'USD') AS currency,
         CAST(COALESCE(s.price, 0) AS CHAR) AS rmbPrice,
         COALESCE(inv.availableQty, 0) AS stockQty,
-        COALESCE(p.updated_at, p.synced_at, s.updated_at) AS syncedAt
-      FROM ebay_sku_price_selections s
-      INNER JOIN ebay_products p
-        ON (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci) = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
+        COALESCE(p.updated_at, p.synced_at) AS syncedAt
+      FROM ebay_products p
+      INNER JOIN (
+        SELECT
+          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+          MAX(COALESCE(price, 0)) AS price
+        FROM ebay_sku_price_selections
+        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
+      ) s
+        ON (SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) COLLATE utf8mb4_unicode_ci) = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
       LEFT JOIN (
         SELECT sku, SUM(available_qty) AS availableQty
         FROM inventory_lines
@@ -291,8 +315,8 @@ export class ProductsService {
           AND TRIM(warehouse_name) <> ''
         GROUP BY sku
       ) inv
-        ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
-      WHERE (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci)
+        ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci)
+      WHERE (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci)
       ORDER BY p.updated_at DESC, p.created_at DESC
       `,
       [skuNorm],
@@ -350,10 +374,16 @@ export class ProductsService {
       `
       SELECT
         COALESCE(NULLIF(TRIM(p.item_url), ''), '') AS itemUrl
-      FROM ebay_sku_price_selections s
-      INNER JOIN ebay_products p
-        ON (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci) = (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci)
-      WHERE (LOWER(TRIM(s.sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci)
+      FROM ebay_products p
+      INNER JOIN (
+        SELECT
+          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+          MAX(COALESCE(price, 0)) AS price
+        FROM ebay_sku_price_selections
+        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
+      ) s
+        ON (SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) COLLATE utf8mb4_unicode_ci) = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
+      WHERE (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci)
       ORDER BY p.updated_at DESC, p.created_at DESC
       `,
       [skuNorm],

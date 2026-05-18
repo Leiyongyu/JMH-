@@ -33,13 +33,16 @@ export class InventoryService {
       .createQueryBuilder('i')
       .orderBy('i.sku', 'ASC')
       .addOrderBy('i.platform', 'ASC');
-    if (q.sku) qb.andWhere('LOWER(i.sku) = LOWER(:sku)', { sku: q.sku.trim() });
+    if (q.sku) {
+      const sku = q.sku.trim();
+      qb.andWhere('LOWER(i.sku) LIKE LOWER(:skuLike)', { skuLike: `%${sku}%` });
+    }
     if (q.platform) qb.andWhere('i.platform = :p', { p: q.platform });
     if (q.warehouse) {
       const w = q.warehouse.trim();
       qb.andWhere(
-        '(i.warehouseCode = :whCode OR LOWER(COALESCE(i.warehouseName, \'\')) LIKE LOWER(:whLike))',
-        { whCode: w, whLike: `%${w}%` },
+        '(LOWER(i.warehouseCode) LIKE LOWER(:whLike) OR LOWER(COALESCE(i.warehouseName, \'\')) LIKE LOWER(:whLike))',
+        { whLike: `%${w}%` },
       );
     }
     if (q.lowStockOnly) {

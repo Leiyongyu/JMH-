@@ -81,5 +81,15 @@ export class WarehousesService {
       .getMany();
     return rows;
   }
-}
 
+  async listActiveWids(limit = 10000): Promise<number[]> {
+    const rows = await this.repo
+      .createQueryBuilder('w')
+      .select(['w.wid'])
+      .where('w.isDelete = 0')
+      .orderBy('w.wid', 'ASC')
+      .limit(Math.min(20000, Math.max(1, limit)))
+      .getMany();
+    return rows.map((r) => Number(r.wid)).filter((x) => Number.isFinite(x));
+  }
+}

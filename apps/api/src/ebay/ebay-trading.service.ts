@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
 import { ebayAxiosConnectionOptions } from './ebay-axios-options';
+import { EbayOAuthService } from './ebay-oauth.service';
+import { EbayUserOAuthService } from './ebay-user-oauth.service';
 
 type VehicleRow = {
   Marke: string | null;
@@ -21,7 +23,11 @@ type ItemSpecificRow = {
 
 @Injectable()
 export class EbayTradingService {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly oauth: EbayOAuthService,
+    private readonly userOAuth: EbayUserOAuthService,
+  ) {}
 
   private browseOrigin(): string {
     const v = (this.config.get<string>('EBAY_ENV') ?? 'production').trim().toLowerCase();
@@ -37,14 +43,6 @@ export class EbayTradingService {
     const s = String(v ?? '').trim();
     if (!s) throw new BadRequestException(`缺少配置：${key}`);
     return s;
-  }
-
-  private userAccessToken(): string {
-    const v1 = String(this.config.get<string>('EBAY_USER_ACCESS_TOKEN') ?? '').trim();
-    if (v1) return v1;
-    const v2 = String(this.config.get<string>('EBAY_TRADING_USER_TOKEN') ?? '').trim();
-    if (v2) return v2;
-    throw new BadRequestException('缺少配置：EBAY_USER_ACCESS_TOKEN（或兼容读取 EBAY_TRADING_USER_TOKEN）');
   }
 
   private siteIdFromUrl(url: string): string {
@@ -140,7 +138,8 @@ export class EbayTradingService {
     const cleanUrl = String(url || '').trim().replace(/^`+|`+$/g, '');
     if (!cleanUrl) throw new BadRequestException('请输入链接');
 
-    const userAccessToken = this.userAccessToken();
+    const appAccessToken = await this.oauth.getAppAccessToken();
+    const userAccessToken = await this.userOAuth.getUserAccessToken();
     const devId = this.requireConfig('EBAY_TRADING_DEV_ID');
     const appId = this.requireConfig('EBAY_TRADING_APP_ID');
     const certId = this.requireConfig('EBAY_TRADING_CERT_ID');
@@ -149,7 +148,7 @@ export class EbayTradingService {
     const siteId = this.siteIdFromUrl(cleanUrl);
     const marketplaceId = this.marketplaceIdFromUrl(cleanUrl);
 
-    const browse = await this.fetchBrowseBasic({ itemId, marketplaceId, token: userAccessToken });
+    const browse = await this.fetchBrowseBasic({ itemId, marketplaceId, token: appAccessToken });
     const vehicles = await this.fetchTradingCompat({ itemId, siteId, devId, appId, certId, token: userAccessToken });
 
     const specificsMap = new Map<string, ItemSpecificRow>();
@@ -219,7 +218,7 @@ export class EbayTradingService {
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
       const data = (err as { response?: { data?: unknown } })?.response?.data;
-      if (status === 401) throw new BadRequestException('Browse API OAuth 失败（请检查 User Access Token 是否有效/是否过期）');
+      if (status === 401) throw new BadRequestException('Browse API OAuth 失败（请检查 eBay App Token / OAuth scopes 配置）');
       if (status === 404) throw new BadRequestException('Browse API 未找到商品（ItemID 不存在或 marketplaceId 不匹配）');
       if (status === 429) throw new BadRequestException('Browse API 限流（429）');
       if (typeof status === 'number') {
