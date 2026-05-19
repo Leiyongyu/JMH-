@@ -17,15 +17,15 @@ export function LoginPage() {
   const { message } = App.useApp();
 
   if (user) {
-    navigate('/inventory', { replace: true });
+    navigate(user.role === 'ADMIN' ? '/inventory' : '/products', { replace: true });
   }
 
   const onFinish = async (values: LoginForm) => {
     setSubmitting(true);
     try {
-      await login(values.account.trim(), values.password);
+      const u = await login(values.account.trim(), values.password);
       message.success('登录成功');
-      navigate('/inventory', { replace: true });
+      navigate(u.role === 'ADMIN' ? '/inventory' : '/products', { replace: true });
     } catch (err: unknown) {
       let msg = '登录失败';
       if (axios.isAxiosError(err)) {

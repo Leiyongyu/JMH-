@@ -6,7 +6,7 @@ import type { AuthUser } from '../api/types';
 interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
-  login: (account: string, password: string) => Promise<void>;
+  login: (account: string, password: string) => Promise<AuthUser>;
   logout: () => void;
   isAdmin: boolean;
 }
@@ -42,6 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await authApi.login(account, password);
     setToken(res.token);
     setUser(res.user);
+    return res.user;
   }, []);
 
   const logout = useCallback(() => {
