@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Card, Input, Table, Button, Space, App, Typography, Progress, Select, Switch, Tag, Row, Col, Statistic } from 'antd';
-import { ReloadOutlined, SyncOutlined, DatabaseOutlined, WarningOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import { Card, Input, Table, Button, Space, App, Typography, Select, Switch, Tag, Row, Col, Statistic } from 'antd';
+import { ReloadOutlined, DatabaseOutlined, WarningOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useSearchParams } from 'react-router-dom';
 import { adminApi, inventoryApi } from '../api/modules';
@@ -21,11 +21,8 @@ export function InventoryPage() {
   const [sortBy, setSortBy] = useState<'sku' | 'availableQty' | 'reservedQty' | 'inboundQty' | 'syncedAt' | undefined>(undefined);
   const [sortOrder, setSortOrder] = useState<'ASC' | 'DESC' | undefined>(undefined);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pendingToastRunIdRef = useRef<string | null>(null);
 
   const platformOptions = Array.from(new Set(data.map((i) => i.platform).filter(Boolean))).map((p) => ({
     label: p,
@@ -36,36 +33,8 @@ export function InventoryPage() {
     if (!isAdmin) return;
     adminApi
       .syncRuns('INVENTORY')
-      .then((runs) => {
-        const r = runs[0] ?? null;
-        setSyncRun(r);
-        if (r && r.status !== 'RUNNING' && r.finishedAt) {
-          setSyncing(false);
-          loadList();
-          if (pendingToastRunIdRef.current !== null && r.id === pendingToastRunIdRef.current) {
-            if (r.status === 'SUCCESS') {
-              message.success(`库存同步完成：成功 ${r.successCount} 条${r.errorCount ? `，失败 ${r.errorCount} 条` : ''}`);
-            } else if (r.status === 'FAILED') {
-              message.error(r.errorMessage ?? '库存同步失败');
-            }
-            pendingToastRunIdRef.current = null;
-          }
-        }
-      })
+      .then((runs) => setSyncRun(runs[0] ?? null))
       .catch(() => {});
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    loadSyncRun();
-    pollRef.current = setInterval(loadSyncRun, 2000);
-  };
-
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
   };
 
   const loadList = (
@@ -139,32 +108,7 @@ export function InventoryPage() {
 
     loadList(initPage, initPageSize, initSku, initPlatform, initWarehouse, initLowStockOnly, initSortBy, initSortOrder);
     loadSyncRun();
-    return stopPolling;
   }, []);
-
-  const onSync = async () => {
-    setSyncing(true);
-    try {
-      const run = await adminApi.syncInventory();
-      pendingToastRunIdRef.current = run.id;
-      setSyncRun(run);
-      startPolling();
-    } catch (err: unknown) {
-      setSyncing(false);
-      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '同步启动失败';
-      message.error(msg);
-    }
-  };
-
-  const isRunning = syncing && syncRun?.status === 'RUNNING';
-  const proc = syncRun?.processedCount ?? 0;
-  const syncTotal = syncRun?.totalCount ?? 0;
-  const progressPercent =
-    isRunning && syncTotal > 0
-      ? Math.min(100, Math.round((proc / syncTotal) * 100))
-      : isRunning
-        ? 0
-        : 0;
 
   // 统计数据
   const lowStockCount = data.filter(i => i.availableQty < 10).length;
@@ -202,21 +146,6 @@ export function InventoryPage() {
           </Card>
         </Col>
       </Row>
-
-      {isAdmin && syncRun && isRunning && (
-        <Card variant="borderless" bodyStyle={{ padding: '16px 24px' }} style={{ background: '#fff7e6', border: '1px solid #ffe7ba' }}>
-          <Space direction="vertical" style={{ width: '100%' }} size={8}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Typography.Text strong>📦 正在同步领星库存明细...</Typography.Text>
-              <Typography.Text type="secondary">{progressPercent}%</Typography.Text>
-            </div>
-            <Progress percent={progressPercent} strokeColor="#faad14" status="active" showInfo={false} />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              已处理: {proc.toLocaleString()} / {syncTotal > 0 ? syncTotal.toLocaleString() : '正在读取...'}
-            </Typography.Text>
-          </Space>
-        </Card>
-      )}
 
       <Card
         variant="borderless"
