@@ -1,15 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-import { Card, Input, Table, Button, Space, App, Typography, Select, Switch, Tag, Row, Col, Statistic } from 'antd';
+import { useEffect, useState } from 'react';
+import { Card, Input, Table, Button, Space, Typography, Select, Switch, Tag, Row, Col, Statistic } from 'antd';
 import { ReloadOutlined, DatabaseOutlined, WarningOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useSearchParams } from 'react-router-dom';
-import { adminApi, inventoryApi } from '../api/modules';
-import type { InventoryLine, SyncRun } from '../api/types';
-import { useAuth } from '../auth/AuthContext';
+import { inventoryApi } from '../api/modules';
+import type { InventoryLine } from '../api/types';
 
 export function InventoryPage() {
-  const { isAdmin } = useAuth();
-  const { message } = App.useApp();
   const [data, setData] = useState<InventoryLine[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -21,21 +18,12 @@ export function InventoryPage() {
   const [sortBy, setSortBy] = useState<'sku' | 'availableQty' | 'reservedQty' | 'inboundQty' | 'syncedAt' | undefined>(undefined);
   const [sortOrder, setSortOrder] = useState<'ASC' | 'DESC' | undefined>(undefined);
   const [loading, setLoading] = useState(false);
-  const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const platformOptions = Array.from(new Set(data.map((i) => i.platform).filter(Boolean))).map((p) => ({
     label: p,
     value: p,
   }));
-
-  const loadSyncRun = () => {
-    if (!isAdmin) return;
-    adminApi
-      .syncRuns('INVENTORY')
-      .then((runs) => setSyncRun(runs[0] ?? null))
-      .catch(() => {});
-  };
 
   const loadList = (
     p = page,
@@ -107,7 +95,6 @@ export function InventoryPage() {
     setSortOrder(initSortOrder);
 
     loadList(initPage, initPageSize, initSku, initPlatform, initWarehouse, initLowStockOnly, initSortBy, initSortOrder);
-    loadSyncRun();
   }, []);
 
   // 统计数据
