@@ -1,5 +1,5 @@
-import { Button, Card, Image, Space, Tag, Typography } from 'antd';
-import { EditOutlined, ShoppingCartOutlined } from '@ant-design/icons';
+import { Button, Card, Checkbox, Image, Space, Tag, Tooltip, Typography } from 'antd';
+import { DeleteOutlined, EditOutlined, ShoppingCartOutlined } from '@ant-design/icons';
 import type { EbayProduct } from '../api/types';
 
 const PLACEHOLDER_IMG =
@@ -49,6 +49,10 @@ export function EbayProductCard(props: {
   onOpen: () => void;
   onAddToCart: () => void;
   onEdit?: () => void;
+  onDelete?: () => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelect?: (sku: string, checked: boolean) => void;
 }) {
   const p = props.product;
   const imgUrl = pickImageUrl(p);
@@ -87,6 +91,25 @@ export function EbayProductCard(props: {
               preview={false}
               style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
             />
+            {props.selectable && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 6,
+                  left: 6,
+                  zIndex: 2,
+                  background: 'rgba(255,255,255,0.85)',
+                  borderRadius: 6,
+                  padding: '2px 4px',
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Checkbox
+                  checked={props.selected ?? false}
+                  onChange={(e) => props.onSelect?.(p.sku, e.target.checked)}
+                />
+              </div>
+            )}
             {outOfStock && (
               <div
                 style={{
@@ -132,19 +155,34 @@ export function EbayProductCard(props: {
               </div>
             </div>
 
-            <Space size={8}>
+            <Space size={4}>
+              {props.onDelete && (
+                <Tooltip title="下架">
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onDelete?.();
+                    }}
+                  />
+                </Tooltip>
+              )}
               {props.onEdit && (
-                <Button
-                  icon={<EditOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.onEdit?.();
-                  }}
-                >
-                  编辑
-                </Button>
+                <Tooltip title="编辑">
+                  <Button
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onEdit?.();
+                    }}
+                  />
+                </Tooltip>
               )}
               <Button
+                size="small"
                 type="primary"
                 icon={<ShoppingCartOutlined />}
                 onClick={(e) => {

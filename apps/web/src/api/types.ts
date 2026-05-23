@@ -18,6 +18,23 @@ export interface AdminUser {
   updatedAt: string;
 }
 
+export interface DistributorGroup {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupMemberUser {
+  id: string;
+  email: string;
+  phone: string | null;
+  role: UserRole;
+  displayName: string | null;
+}
+
 export interface JwtMe {
   sub: string;
   email: string;

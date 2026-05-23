@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   DefaultValuePipe,
+  Delete,
   Get,
   HttpCode,
   NotFoundException,
@@ -268,9 +269,15 @@ export class AdminController {
       limits: { fileSize: 10 * 1024 * 1024 },
     }),
   )
-  async importEbayPricesXlsx(@UploadedFile() file?: Express.Multer.File, @CurrentUser() user?: JwtUser) {
+  async importEbayPricesXlsx(
+    @UploadedFile() file?: Express.Multer.File,
+    @CurrentUser() user?: JwtUser,
+    @Query('mode') mode?: string,
+  ) {
     if (!file?.buffer?.length) throw new BadRequestException('请上传 Excel 文件');
-    const result = await this.productsSync.importSkuPriceXlsx(file.buffer, user?.email);
+    const m = String(mode ?? '').trim().toLowerCase();
+    const parsedMode = m === 'replace' ? 'replace' : 'incremental';
+    const result = await this.productsSync.importSkuPriceXlsx(file.buffer, user?.email, parsedMode);
     return result;
   }
 
@@ -311,6 +318,24 @@ export class AdminController {
   @Post('products/ebay/:sku/refresh-from-ebay')
   async refreshFromEbay(@Param('sku') sku: string) {
     return this.products.refreshFromEbayApiBySku(sku);
+  }
+
+  @ApiOperation({ summary: '管理员按 SKU 前缀下架（从 ebay_sku_price_selections 移除第二个横杠前一致的所有 SKU）' })
+  @HttpCode(200)
+  @Delete('products/ebay/price-selection/:sku')
+  async deletePriceSelection(@Param('sku') sku: string) {
+    const result = await this.productsSync.deleteSkuFromSelection(sku);
+    if (result.deleted === 0) throw new NotFoundException(`SKU 前缀「${result.prefix}」不在定价选择表中`);
+    return { prefix: result.prefix, deleted: result.deleted };
+  }
+
+  @ApiOperation({ summary: '管理员批量删除 SKU 的定价选择（下架：从 ebay_sku_price_selections 移除）' })
+  @HttpCode(200)
+  @Delete('products/ebay/price-selections')
+  async batchDeletePriceSelections(@Body() body: { skus: string[] }) {
+    const skus = (body?.skus ?? []).map((s) => String(s).trim()).filter(Boolean);
+    if (skus.length === 0) throw new BadRequestException('请提供要删除的 SKU 列表');
+    return this.productsSync.deleteSkusFromSelection(skus);
   }
 
 }

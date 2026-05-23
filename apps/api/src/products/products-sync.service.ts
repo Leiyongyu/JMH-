@@ -1,7 +1,7 @@
 import { BadGatewayException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { LingxingHttpService } from '../lingxing/lingxing-http.service';
 import {
   LingxingApiError,
@@ -17,6 +17,7 @@ import { SyncRun } from '../sync/sync-run.entity';
 import { coerceLingxingListTotal, estimateSyncTotalCount } from '../sync/sync-progress.util';
 import ExcelJS from 'exceljs';
 import { EbaySkuPriceSelection } from './ebay-sku-price-selection.entity';
+import { EbayProduct } from './ebay-product.entity';
 
 @Injectable()
 export class ProductsSyncService {
@@ -28,6 +29,7 @@ export class ProductsSyncService {
     private readonly products: ProductsService,
     private readonly sync: SyncService,
     @InjectRepository(EbaySkuPriceSelection) private readonly selectionRepo: Repository<EbaySkuPriceSelection>,
+    @InjectRepository(EbayProduct) private readonly productRepo: Repository<EbayProduct>,
   ) {}
 
   /** 异步触发同步：创建 run 后立即返回，后台执行 */
@@ -183,13 +185,14 @@ export class ProductsSyncService {
 
   /**
    * 上传 SKU+价格 Excel 后：
-   * 1) 从领星拉取指定 SKU 商品信息
-   * 2) 用 Excel 价格覆盖
-   * 3) 只保留这些 SKU 为 ACTIVE（其他 SKU 置为 INACTIVE）
+   * 1) 解析 SKU + 价格
+   * 2) 将 SKU+价格写入 ebay_sku_price_selections（默认增量 upsert，不会清空历史 SKU）
+   * 3) 将选中的 SKU 价格写回 ebay_products（仅更新已存在的 SKU；不存在会返回 notFound）
    */
   async importSkuPriceXlsx(
     buf: Buffer,
     triggeredBy?: string | null,
+    mode: 'incremental' | 'replace' = 'incremental',
   ): Promise<{
     totalRows: number;
     updated: number;
@@ -265,21 +268,93 @@ export class ProductsSyncService {
       };
     }
 
-    await this.upsertSelections(priceMap);
-    const result = await this.products.applySkuPricesFromSelection(priceMap);
+    const uniqueSkus = Array.from(new Set(skus.map((s) => s.trim()).filter(Boolean)));
+
+    // 按前缀匹配（与列表页 INNER JOIN 规则一致）
+    const prefixToExcelSku = new Map<string, string>();
+    for (const sku of uniqueSkus) {
+      const pfx = this.skuPrefix(sku).toLowerCase();
+      if (!prefixToExcelSku.has(pfx)) prefixToExcelSku.set(pfx, sku);
+    }
+    const prefixes = Array.from(prefixToExcelSku.keys());
+
+    const matchedProducts = prefixes.length > 0
+      ? await this.productRepo
+          .createQueryBuilder('p')
+          .where("LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (:...prefixes)", { prefixes })
+          .getMany()
+      : [];
+
+    const foundPrefixes = new Set(matchedProducts.map((p) => this.skuPrefix(p.sku).toLowerCase()));
+    const notFoundSkus = uniqueSkus.filter((s) => !foundPrefixes.has(this.skuPrefix(s).toLowerCase()));
+
+    const existedPriceMap = new Map<string, string>();
+    for (const [sku, price] of priceMap.entries()) {
+      if (foundPrefixes.has(this.skuPrefix(sku).toLowerCase())) {
+        existedPriceMap.set(sku, price);
+      }
+    }
+
+    await this.upsertSelections(existedPriceMap, mode);
+    const result = await this.products.applySkuPricesFromSelection(existedPriceMap);
     return {
       totalRows,
       updated: result.updated,
-      notFound: result.notFound,
+      notFound: notFoundSkus.length,
       invalid,
-      details: details.concat(result.notFoundSkus.map((sku) => ({ row: 0, sku, status: 'NOT_FOUND', message: '本地商品库未找到该 SKU（请先同步 eBay 商品）' }))),
-      skus,
+      details: details.concat(notFoundSkus.map((sku) => ({ row: 0, sku, status: 'NOT_FOUND', message: '本地商品库未找到匹配前缀的 SKU（请先同步 eBay 商品）' }))),
+      skus: Array.from(existedPriceMap.keys()),
     };
   }
 
-  private async upsertSelections(priceMap: Map<string, string>): Promise<void> {
+  /** 取 SKU 第二个横杠之前的部分，与列表页 INNER JOIN 的匹配规则一致 */
+  private skuPrefix(sku: string): string {
+    const parts = String(sku).trim().split('-');
+    return parts.slice(0, 2).join('-');
+  }
+
+  async deleteSkuFromSelection(sku: string): Promise<{ deleted: number; prefix: string }> {
+    const prefix = this.skuPrefix(sku);
+    const result = await this.selectionRepo
+      .createQueryBuilder()
+      .delete()
+      .where("SUBSTRING_INDEX(TRIM(sku), '-', 2) = :prefix", { prefix })
+      .execute();
+    return { deleted: result.affected ?? 0, prefix };
+  }
+
+  async deleteSkusFromSelection(skus: string[]): Promise<{ deleted: number; notFound: string[] }> {
+    const prefixes = Array.from(new Set(skus.map((s) => this.skuPrefix(s)).filter(Boolean)));
+    if (prefixes.length === 0) return { deleted: 0, notFound: [] };
+
+    // 先查出哪些前缀在表中存在
+    const existing = await this.selectionRepo
+      .createQueryBuilder('s')
+      .select("DISTINCT SUBSTRING_INDEX(TRIM(s.sku), '-', 2)", 'prefix')
+      .where('s.sku IS NOT NULL')
+      .getRawMany<{ prefix: string }>();
+    const existingPrefixes = new Set(existing.map((e) => e.prefix));
+    const notFound = prefixes.filter((p) => !existingPrefixes.has(p));
+
+    let deleted = 0;
+    const matchPrefixes = prefixes.filter((p) => existingPrefixes.has(p));
+    if (matchPrefixes.length > 0) {
+      const result = await this.selectionRepo
+        .createQueryBuilder()
+        .delete()
+        .where("SUBSTRING_INDEX(TRIM(sku), '-', 2) IN (:...prefixes)", { prefixes: matchPrefixes })
+        .execute();
+      deleted = result.affected ?? 0;
+    }
+    return { deleted, notFound };
+  }
+
+  private async upsertSelections(priceMap: Map<string, string>, mode: 'incremental' | 'replace'): Promise<void> {
     const rows = Array.from(priceMap.entries()).map(([sku, price]) => ({ sku, price } as const));
     if (rows.length === 0) return;
+    if (mode === 'replace') {
+      await this.selectionRepo.createQueryBuilder().delete().execute();
+    }
     const qb = this.selectionRepo
       .createQueryBuilder()
       .insert()

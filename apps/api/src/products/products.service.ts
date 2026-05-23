@@ -13,6 +13,8 @@ import { EbayTestCacheService } from '../ebay/ebay-test-cache.service';
 import { extractLegacyItemIdFromItemUrl, marketplaceIdFromUrl } from '../ebay/ebay.util';
 import ExcelJS from 'exceljs';
 import { InventoryLine } from '../inventory/inventory-line.entity';
+import { JwtUser } from '../common/current-user.decorator';
+import { AccessControlService } from '../access/access-control.service';
 
 export interface ProductListQuery {
   keyword?: string;
@@ -37,6 +39,7 @@ export class ProductsService {
     private readonly ebayBrowse: EbayBrowseService,
     private readonly ebayUrlTest: EbayUrlTestService,
     private readonly ebayTestCache: EbayTestCacheService,
+    private readonly access: AccessControlService,
   ) {}
 
   private async hasMainImageCol(): Promise<boolean> {
@@ -95,7 +98,7 @@ export class ProductsService {
     return null;
   }
 
-  async list(q: ProductListQuery) {
+  async list(q: ProductListQuery, user: JwtUser) {
     const page = Math.max(1, Number(q.page ?? 1));
     const pageSize = Math.min(100, Math.max(1, Number(q.pageSize ?? 20)));
     const kw = q.keyword?.trim();
@@ -104,6 +107,20 @@ export class ProductsService {
     const sortBy = q.sortBy ?? 'stockQty';
     const whereParts: string[] = [];
     const whereParams: unknown[] = [];
+    if (user.role !== 'ADMIN') {
+      const groupIds = await this.access.getUserGroupIds(user.sub);
+      if (groupIds.length > 0) {
+        whereParts.push(`(
+          NOT EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg WHERE pvg.product_id = p.id)
+          OR EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg2 WHERE pvg2.product_id = p.id AND pvg2.group_id IN (?))
+        )`);
+        whereParams.push(groupIds);
+      } else {
+        whereParts.push(`(
+          NOT EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg WHERE pvg.product_id = p.id)
+        )`);
+      }
+    }
     if (kw) {
       whereParts.push(`(
         (p.sku_norm COLLATE utf8mb4_unicode_ci) LIKE (? COLLATE utf8mb4_unicode_ci)
@@ -554,20 +571,44 @@ export class ProductsService {
   }
 
   async applySkuPricesFromSelection(priceMap: Map<string, string>): Promise<{ updated: number; notFound: number; notFoundSkus: string[] }> {
-    const skus = Array.from(priceMap.keys()).map((s) => s.trim()).filter(Boolean);
-    const uniqueSkus = Array.from(new Set(skus));
-    if (uniqueSkus.length === 0) return { updated: 0, notFound: 0, notFoundSkus: [] };
+    const entries = Array.from(priceMap.entries()).filter(([sku]) => String(sku).trim());
+    if (entries.length === 0) return { updated: 0, notFound: 0, notFoundSkus: [] };
 
-    const existed = await this.repo.find({ where: { sku: In(uniqueSkus) } });
-    const existedSet = new Set(existed.map((p) => p.sku));
-    const notFoundSkus = uniqueSkus.filter((s) => !existedSet.has(s));
-
-    for (const p of existed) {
-      const next = priceMap.get(p.sku);
-      if (next !== undefined) p.price = next;
+    // 按前缀匹配（与列表页 INNER JOIN 规则一致）
+    const prefixToPrice = new Map<string, string>();
+    for (const [sku, price] of entries) {
+      const parts = String(sku).trim().split('-');
+      const prefix = parts.slice(0, 2).join('-').toLowerCase();
+      if (!prefixToPrice.has(prefix)) prefixToPrice.set(prefix, price);
     }
-    await this.repo.save(existed);
-    return { updated: existed.length, notFound: notFoundSkus.length, notFoundSkus };
+    const prefixes = Array.from(prefixToPrice.keys());
+
+    const matched = prefixes.length > 0
+      ? await this.repo
+          .createQueryBuilder('p')
+          .where("LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (:...prefixes)", { prefixes })
+          .getMany()
+      : [];
+
+    const matchedPrefixes = new Set(
+      matched.map((p) => {
+        const parts = String(p.sku).trim().split('-');
+        return parts.slice(0, 2).join('-').toLowerCase();
+      }),
+    );
+    const notFoundSkus = Array.from(priceMap.keys()).filter((s) => {
+      const parts = String(s).trim().split('-');
+      return !matchedPrefixes.has(parts.slice(0, 2).join('-').toLowerCase());
+    });
+
+    for (const p of matched) {
+      const parts = String(p.sku).trim().split('-');
+      const prefix = parts.slice(0, 2).join('-').toLowerCase();
+      const price = prefixToPrice.get(prefix);
+      if (price !== undefined) p.price = price;
+    }
+    await this.repo.save(matched);
+    return { updated: matched.length, notFound: notFoundSkus.length, notFoundSkus };
   }
 
   async adminExportEbayProducts(): Promise<Array<{ sku: string; price: string }>> {

@@ -14,6 +14,8 @@ import { AdminModule } from './admin/admin.module';
 import { UsersService } from './users/users.service';
 import { CartModule } from './cart/cart.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
+import { SyncSchedulerService } from './sync/sync-scheduler.service';
+import { FileLoggerService } from './common/file-logger.service';
 
 @Module({
   imports: [
@@ -58,6 +60,7 @@ import { WarehousesModule } from './warehouses/warehouses.module';
     CartModule,
     AdminModule,
   ],
+  providers: [SyncSchedulerService, FileLoggerService],
 })
 export class AppModule implements OnModuleInit {
   constructor(private readonly users: UsersService) {}

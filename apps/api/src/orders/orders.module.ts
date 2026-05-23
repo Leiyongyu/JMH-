@@ -15,9 +15,10 @@ import { LingxingOrderRetryService } from './lingxing-order-retry.service';
 import { LingxingOrderStatusSyncService } from './lingxing-order-status-sync.service';
 import { SyncModule } from '../sync/sync.module';
 import { LingxingWarehouse } from '../warehouses/lingxing-warehouse.entity';
+import { AccessControlModule } from '../access/access-control.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([DistributorOrder, OrderLine, OrderShippingAddress, EbayProduct, User, LingxingOrderLink, LingxingWarehouse]), LingxingModule, SyncModule],
+  imports: [TypeOrmModule.forFeature([DistributorOrder, OrderLine, OrderShippingAddress, EbayProduct, User, LingxingOrderLink, LingxingWarehouse]), LingxingModule, SyncModule, AccessControlModule],
   providers: [OrdersService, LingxingOrderPushService, LingxingOrderRetryService, LingxingOrderStatusSyncService],
   controllers: [OrdersController, OrdersLingxingController],
   exports: [OrdersService, LingxingOrderStatusSyncService],

@@ -274,11 +274,6 @@ export function InventoryPage() {
             <Button icon={<ReloadOutlined />} onClick={() => loadList(page, pageSize, keyword, platform, warehouse, lowStockOnly, sortBy, sortOrder)}>
               刷新
             </Button>
-            {isAdmin && (
-              <Button type="primary" icon={<SyncOutlined spin={isRunning} />} loading={isRunning} onClick={onSync}>
-                {isRunning ? '同步中' : '同步库存'}
-              </Button>
-            )}
           </Space>
         }
       >

@@ -1,6 +1,6 @@
 import { api } from './client';
 
-import type { AdminUser, AuthUser, DistributorOrder, EbayOfficialLiveBrowseBySkuResult, EbayOfficialLiveFitmentBySkuResult, EbayOfficialProductBundle, EbayProduct, EbayTradingGetItemResult, InventoryLine, InventorySummary, PageResult, SyncRun } from './types';
+import type { AdminUser, AuthUser, DistributorGroup, DistributorOrder, EbayOfficialLiveBrowseBySkuResult, EbayOfficialLiveFitmentBySkuResult, EbayOfficialProductBundle, EbayProduct, EbayTradingGetItemResult, GroupMemberUser, InventoryLine, InventorySummary, PageResult, SyncRun } from './types';
 
 export const authApi = {
   login: (account: string, password: string) =>
@@ -123,7 +123,7 @@ export const adminApi = {
   exportEbayProductsXlsx: () =>
     api.get<ArrayBuffer>('/admin/products/ebay/export/xlsx', { responseType: 'arraybuffer' }).then((r) => r.data),
 
-  importEbayPriceXlsx: (file: File) => {
+  importEbayPriceXlsx: (file: File, mode?: 'incremental' | 'replace') => {
     const fd = new FormData();
     fd.append('file', file);
     return api
@@ -135,7 +135,42 @@ export const adminApi = {
         details: Array<{ row: number; sku?: string; status: string; message?: string }>;
         skus: string[];
         officialRun: SyncRun | null;
-      }>('/admin/products/ebay/import/price-xlsx', fd)
+      }>('/admin/products/ebay/import/price-xlsx', fd, { params: { mode } })
       .then((r) => r.data);
   },
+
+  distributorGroups: () => api.get<DistributorGroup[]>('/admin/distributor-groups').then((r) => r.data),
+  createDistributorGroup: (body: { code: string; name: string; description?: string | null }) =>
+    api.post<DistributorGroup>('/admin/distributor-groups', body).then((r) => r.data),
+  updateDistributorGroup: (id: string, patch: Partial<{ code: string; name: string; description: string | null }>) =>
+    api.patch<DistributorGroup>(`/admin/distributor-groups/${encodeURIComponent(id)}`, patch).then((r) => r.data),
+  deleteDistributorGroup: (id: string) =>
+    api.delete<DistributorGroup>(`/admin/distributor-groups/${encodeURIComponent(id)}`).then((r) => r.data),
+
+  distributorGroupMembers: (groupId: string) =>
+    api.get<GroupMemberUser[]>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/members`).then((r) => r.data),
+  setDistributorGroupMembers: (groupId: string, userIds: string[]) =>
+    api.put<{ groupId: string; userIds: string[] }>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/members`, { userIds }).then((r) => r.data),
+
+  distributorGroupProducts: (groupId: string) =>
+    api.get<string[]>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/products`).then((r) => r.data),
+  setDistributorGroupProducts: (groupId: string, skus: string[]) =>
+    api.put<{ totalRows: number; bound: number; missing: string[] }>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/products`, { skus }).then((r) => r.data),
+  importDistributorGroupProductsXlsx: (groupId: string, file: File, mode?: 'replace' | 'add' | 'remove') => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api
+      .post<{ totalRows: number; bound: number; missing: string[] }>(
+        `/admin/distributor-groups/${encodeURIComponent(groupId)}/products/import/xlsx`,
+        fd,
+        { params: { mode } },
+      )
+      .then((r) => r.data);
+  },
+
+  deletePriceSelection: (sku: string) =>
+    api.delete<{ prefix: string; deleted: number }>(`/admin/products/ebay/price-selection/${encodeURIComponent(sku)}`).then((r) => r.data),
+
+  batchDeletePriceSelections: (skus: string[]) =>
+    api.delete<{ deleted: number; notFound: string[] }>('/admin/products/ebay/price-selections', { data: { skus } }).then((r) => r.data),
 };

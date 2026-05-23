@@ -12,9 +12,10 @@ import { EbayModule } from '../ebay/ebay.module';
 import { LingxingModule } from '../lingxing/lingxing.module';
 import { SyncModule } from '../sync/sync.module';
 import { InventoryLine } from '../inventory/inventory-line.entity';
+import { AccessControlModule } from '../access/access-control.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([EbayProduct, EbaySkuPriceSelection, InventoryLine]), LingxingModule, SyncModule, EbayModule],
+  imports: [TypeOrmModule.forFeature([EbayProduct, EbaySkuPriceSelection, InventoryLine]), LingxingModule, SyncModule, EbayModule, AccessControlModule],
   providers: [ProductsService, ProductsSyncService, EbayOfficialProductsSyncService, EbayOfficialProductsService, EbayItemPageService],
   controllers: [ProductsController],
   exports: [ProductsService, ProductsSyncService, EbayOfficialProductsSyncService, EbayOfficialProductsService, EbayItemPageService],

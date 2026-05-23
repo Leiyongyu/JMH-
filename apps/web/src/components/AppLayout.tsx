@@ -7,6 +7,7 @@ import {
   UserOutlined,
   LogoutOutlined,
   TeamOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
@@ -28,6 +29,8 @@ export function AppLayout() {
         ? 'products'
         : location.pathname.startsWith('/users')
           ? 'users'
+          : location.pathname.startsWith('/access')
+            ? 'access'
         : location.pathname.startsWith('/cart')
           ? 'cart'
           : location.pathname.startsWith('/orders')
@@ -41,6 +44,7 @@ export function AppLayout() {
     ...(isAdmin
       ? [
           { key: 'users', icon: <TeamOutlined />, label: <Link to="/users">用户管理</Link> },
+          { key: 'access', icon: <SettingOutlined />, label: <Link to="/access">分组权限</Link> },
         ]
       : []),
   ];

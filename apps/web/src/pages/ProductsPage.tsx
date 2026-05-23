@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, App, Button, Card, Form, Input, InputNumber, Modal, Pagination, Progress, Select, Space, Spin, Statistic, Row, Col, Skeleton, Empty, Typography, Upload } from 'antd';
-import { ReloadOutlined, SyncOutlined, GlobalOutlined, InfoCircleOutlined, UploadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Card, Checkbox, Form, Input, InputNumber, Modal, Pagination, Select, Space, Spin, Statistic, Row, Col, Skeleton, Empty, Typography, Upload } from 'antd';
+import { DeleteOutlined, ReloadOutlined, SyncOutlined, GlobalOutlined, InfoCircleOutlined, UploadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { adminApi, productsApi } from '../api/modules';
 import type { EbayProduct, SyncRun } from '../api/types';
@@ -27,7 +27,8 @@ export function ProductsPage() {
   const [sortBy, setSortBy] = useState<'stockQty' | 'price' | 'sku' | 'syncedAt'>('stockQty');
   const [sortOrder, setSortOrder] = useState<'ASC' | 'DESC'>('DESC');
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set());
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -36,8 +37,6 @@ export function ProductsPage() {
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editForm] = Form.useForm();
-  const pendingToastRunIdRef = useRef<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const keywordRef = useRef('');
   const pageSizeRef = useRef(pageSize);
@@ -121,38 +120,9 @@ export function ProductsPage() {
     adminApi
       .syncRuns('EBAY_PRODUCT')
       .then((runs) => {
-        const r = runs[0] ?? null;
-        setSyncRun(r);
-        if (r && r.status !== 'RUNNING' && r.finishedAt) {
-          const isPending = pendingToastRunIdRef.current !== null && r.id === pendingToastRunIdRef.current;
-          setSyncing(false);
-          if (isPending) {
-            load();
-            if (r.status === 'SUCCESS') {
-              message.success(
-                `eBay 商品同步完成：成功 ${r.successCount} 条${r.errorCount ? `，失败 ${r.errorCount} 条` : ''}`,
-              );
-            } else if (r.status === 'FAILED') {
-              message.error(r.errorMessage ?? 'eBay 商品同步失败');
-            }
-            pendingToastRunIdRef.current = null;
-          }
-        }
+        setSyncRun(runs[0] ?? null);
       })
       .catch(() => {});
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    loadSyncRun();
-    pollRef.current = setInterval(loadSyncRun, 2000);
-  };
-
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
   };
 
   useEffect(() => {
@@ -204,9 +174,6 @@ export function ProductsPage() {
       load(1, autoPageSize, '', sortByRef.current, sortOrderRef.current);
     }
     loadSyncRun();
-    return () => {
-      stopPolling();
-    };
   }, []);
 
   useEffect(() => {
@@ -226,20 +193,6 @@ export function ProductsPage() {
       }
     };
   }, []);
-
-  const onSync = async () => {
-    setSyncing(true);
-    try {
-      const run = await adminApi.syncEbayProducts();
-      pendingToastRunIdRef.current = run.id;
-      setSyncRun(run);
-      startPolling();
-    } catch (err: unknown) {
-      setSyncing(false);
-      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '同步启动失败';
-      message.error(msg);
-    }
-  };
 
   const onExport = async () => {
     try {
@@ -262,16 +215,90 @@ export function ProductsPage() {
     }
   };
 
+  const onDeleteProduct = (p: EbayProduct) => {
+    Modal.confirm({
+      title: '确认下架商品？',
+      content: `将删除前缀为「${p.sku.split('-').slice(0, 2).join('-')}」的所有定价选择（第二个横杠前一致的 SKU 都会被下架）。`,
+      okText: '确认下架',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await adminApi.deletePriceSelection(p.sku);
+          message.success(`已下架 ${res.deleted} 条：前缀 ${res.prefix}`);
+          load(1, pageSizeRef.current, keywordRef.current, sortByRef.current, sortOrderRef.current);
+        } catch (err: unknown) {
+          const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '删除失败';
+          message.error(msg);
+        }
+      },
+    });
+  };
+
+  const onBatchDelete = () => {
+    if (selectedSkus.size === 0) return;
+    const skus = Array.from(selectedSkus);
+    Modal.confirm({
+      title: '确认批量下架？',
+      content: `已选中 ${skus.length} 个 SKU，将按前缀删除其在定价选择表中的所有条目。`,
+      okText: '确认下架',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await adminApi.batchDeletePriceSelections(skus);
+          message.success(`已下架 ${res.deleted} 条${res.notFound.length > 0 ? `，${res.notFound.length} 个前缀未找到` : ''}`);
+          setSelectedSkus(new Set());
+          setSelectMode(false);
+          load(1, pageSizeRef.current, keywordRef.current, sortByRef.current, sortOrderRef.current);
+        } catch (err: unknown) {
+          const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '批量删除失败';
+          message.error(msg);
+        }
+      },
+    });
+  };
+
+  const toggleSelect = (sku: string, checked: boolean) => {
+    setSelectedSkus((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(sku);
+      else next.delete(sku);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (checked: boolean) => {
+    if (checked) setSelectedSkus(new Set(data.map((p) => p.sku)));
+    else setSelectedSkus(new Set());
+  };
+
   const onImport = async (file: File) => {
     Modal.confirm({
       title: '确认导入并批量更新价格？',
-      content: '将按 SKU 匹配本地商品库中的记录（请先同步 eBay 商品），并用 Excel 的 price 覆盖对应 SKU 的人民币价格。',
+      content: '增量更新：只更新/新增 Excel 中的 SKU 人民币价格，不会删除历史 SKU。若需要全量覆盖，请后续增加 replace 模式。',
       okText: '确认导入',
       cancelText: '取消',
       onOk: async () => {
         try {
-          const res = await adminApi.importEbayPriceXlsx(file);
+          const res = await adminApi.importEbayPriceXlsx(file, 'incremental');
           message.success(`导入完成：更新 ${res.updated} 条，未找到 ${res.notFound} 条，无效 ${res.invalid} 条`);
+          const notFoundSkus = (res.details ?? [])
+            .filter((x) => x.status === 'NOT_FOUND' && x.sku)
+            .map((x) => String(x.sku))
+            .slice(0, 200);
+          if (notFoundSkus.length > 0) {
+            Modal.info({
+              title: '部分 SKU 未找到',
+              content: (
+                <div style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                  {notFoundSkus.join('\n')}
+                  {res.notFound > notFoundSkus.length ? `\n...（共 ${res.notFound} 个）` : ''}
+                </div>
+              ),
+              okText: '知道了',
+            });
+          }
           load(1, pageSizeRef.current, keywordRef.current, sortByRef.current, sortOrderRef.current);
         } catch (err: unknown) {
           const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '导入失败';
@@ -342,16 +369,6 @@ export function ProductsPage() {
       },
     });
   };
-
-  const isRunning = syncing && syncRun?.status === 'RUNNING';
-  const proc = syncRun?.processedCount ?? 0;
-  const syncTotal = syncRun?.totalCount ?? 0;
-  const progressPercent =
-    isRunning && syncTotal > 0
-      ? Math.min(100, Math.round((proc / syncTotal) * 100))
-      : isRunning
-        ? 0
-        : 0;
 
   return (
     <Space direction="vertical" size={24} style={{ width: '100%' }}>
@@ -435,11 +452,6 @@ export function ProductsPage() {
               刷新
             </Button>
             {isAdmin && (
-              <Button type="primary" icon={<SyncOutlined spin={isRunning} />} loading={isRunning} onClick={onSync}>
-                {isRunning ? '同步中…' : '立即同步'}
-              </Button>
-            )}
-            {isAdmin && (
               <Button onClick={onExport}>
                 导出 Excel
               </Button>
@@ -456,26 +468,33 @@ export function ProductsPage() {
                 <Button icon={<UploadOutlined />}>上传 Excel</Button>
               </Upload>
             )}
+            {isAdmin && (
+              <Button
+                type={selectMode ? 'primary' : 'default'}
+                danger={selectMode}
+                onClick={() => {
+                  setSelectMode((prev) => {
+                    if (prev) setSelectedSkus(new Set());
+                    return !prev;
+                  });
+                }}
+              >
+                {selectMode ? '退出选择' : '批量选择'}
+              </Button>
+            )}
           </Space>
         }
       >
-        {isAdmin && syncRun && isRunning && (
-          <div style={{ marginBottom: 24, padding: '16px', background: '#e6f4ff', borderRadius: 8 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-              <Typography.Text strong color="primary">正在从领星同步 eBay 数据...</Typography.Text>
-              <Typography.Text type="secondary">{progressPercent}%</Typography.Text>
-            </div>
-            <Progress
-              percent={progressPercent}
-              strokeColor={{ from: '#1677ff', to: '#69b1ff' }}
-              status="active"
-              showInfo={false}
-            />
-            <div style={{ marginTop: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                已处理: {proc.toLocaleString()} / {syncTotal > 0 ? syncTotal.toLocaleString() : '...'}
-              </Typography.Text>
-            </div>
+        {selectMode && data.length > 0 && (
+          <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Checkbox
+              checked={selectedSkus.size === data.length && data.length > 0}
+              indeterminate={selectedSkus.size > 0 && selectedSkus.size < data.length}
+              onChange={(e) => toggleSelectAll(e.target.checked)}
+            >
+              全选
+            </Checkbox>
+            <Typography.Text type="secondary">已选 {selectedSkus.size} / {data.length} 个</Typography.Text>
           </div>
         )}
 
@@ -501,7 +520,14 @@ export function ProductsPage() {
               <EbayProductCard
                 key={p.id}
                 product={p}
+                selectable={selectMode}
+                selected={selectedSkus.has(p.sku)}
+                onSelect={toggleSelect}
                 onOpen={() => {
+                  if (selectMode) {
+                    toggleSelect(p.sku, !selectedSkus.has(p.sku));
+                    return;
+                  }
                   sessionStorage.setItem(
                     PRODUCTS_LIST_STATE_KEY,
                     JSON.stringify({
@@ -516,11 +542,17 @@ export function ProductsPage() {
                   navigate(`/products/${encodeURIComponent(p.sku)}`, { state: { product: p } });
                 }}
                 onEdit={
-                  isAdmin
+                  isAdmin && !selectMode
                     ? () => openEdit(p)
                     : undefined
                 }
+                onDelete={
+                  isAdmin && !selectMode
+                    ? () => onDeleteProduct(p)
+                    : undefined
+                }
                 onAddToCart={() => {
+                  if (selectMode) return;
                   cart.add({
                     sku: p.sku,
                     title: p.title,
@@ -621,6 +653,32 @@ export function ProductsPage() {
             </Form>
           </Spin>
         </Modal>
+
+        {selectMode && selectedSkus.size > 0 && (
+          <div
+            style={{
+              position: 'sticky',
+              bottom: 16,
+              zIndex: 10,
+              marginTop: 16,
+              padding: '12px 20px',
+              background: '#fff',
+              borderRadius: 8,
+              boxShadow: '0 -2px 12px rgba(0,0,0,0.12)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}
+          >
+            <Typography.Text strong>已选 {selectedSkus.size} 个 SKU</Typography.Text>
+            <Space>
+              <Button onClick={() => { setSelectedSkus(new Set()); setSelectMode(false); }}>取消</Button>
+              <Button type="primary" danger icon={<DeleteOutlined />} onClick={onBatchDelete}>
+                批量下架
+              </Button>
+            </Space>
+          </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
           <Pagination

@@ -17,6 +17,7 @@ import { LingxingOrderPushService } from './lingxing-order-push.service';
 import { LingxingOrderLink } from './lingxing-order-link.entity';
 import { lingxingOrderStatusText } from './lingxing-order-status.util';
 import { LingxingWarehouse } from '../warehouses/lingxing-warehouse.entity';
+import { AccessControlService } from '../access/access-control.service';
 
 export interface OrderListQuery {
   page?: number;
@@ -53,6 +54,7 @@ export class OrdersService {
     @InjectRepository(LingxingWarehouse) private readonly whRepo: Repository<LingxingWarehouse>,
     private readonly dataSource: DataSource,
     private readonly lingxingPush: LingxingOrderPushService,
+    private readonly access: AccessControlService,
   ) {}
 
   private normalizeShipWarehouseCode(input?: string | null): string | null {
@@ -74,6 +76,11 @@ export class OrdersService {
     }
     if (!dto.shippingAddress) {
       throw new BadRequestException('请填写收货地址');
+    }
+    if (currentUser.role !== 'ADMIN') {
+      for (const it of dto.items) {
+        await this.access.assertEbaySkuVisibleToUser(String(it?.sku ?? ''), currentUser);
+      }
     }
     const created = await this.dataSource.transaction(async (mgr) => {
       const buyer = await mgr.getRepository(User).findOne({ where: { id: currentUser.sub } });

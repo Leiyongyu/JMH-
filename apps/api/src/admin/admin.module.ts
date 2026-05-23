@@ -8,9 +8,11 @@ import { UsersModule } from '../users/users.module';
 import { WarehousesModule } from '../warehouses/warehouses.module';
 import { OrdersModule } from '../orders/orders.module';
 import { EbayModule } from '../ebay/ebay.module';
+import { AccessControlModule } from '../access/access-control.module';
+import { AdminDistributorGroupsController } from './admin-distributor-groups.controller';
 
 @Module({
-  imports: [InventoryModule, WarehousesModule, ProductsModule, OrdersModule, SyncModule, UsersModule, EbayModule],
-  controllers: [AdminController, AdminUsersController],
+  imports: [InventoryModule, WarehousesModule, ProductsModule, OrdersModule, SyncModule, UsersModule, EbayModule, AccessControlModule],
+  controllers: [AdminController, AdminUsersController, AdminDistributorGroupsController],
 })
 export class AdminModule {}

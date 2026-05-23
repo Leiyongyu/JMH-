@@ -11,6 +11,7 @@ import { CartPage } from './pages/CartPage';
 import { OrdersPage } from './pages/OrdersPage';
 import { OrderDetailPage } from './pages/OrderDetailPage';
 import { UsersPage } from './pages/UsersPage';
+import { DistributorGroupsPage } from './pages/DistributorGroupsPage';
 
 function HomeIndexRedirect() {
   const { isAdmin } = useAuth();
@@ -48,6 +49,14 @@ export function AppRoutes() {
           element={
             <AdminRoute>
               <UsersPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="access"
+          element={
+            <AdminRoute>
+              <DistributorGroupsPage />
             </AdminRoute>
           }
         />
