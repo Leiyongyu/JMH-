@@ -82,7 +82,7 @@ export class AdminDistributorGroupsController {
     return this.access.setGroupProductsBySkus(id, body?.skus ?? []);
   }
 
-  @ApiOperation({ summary: '管理员：导入分组可见商品（Excel，第 1 列为 SKU）' })
+  @ApiOperation({ summary: '管理员：导入分组可见商品（Excel，第 1 列 SKU，可选第 2 列 price 为专属定价）' })
   @HttpCode(200)
   @Post(':id/products/import/xlsx')
   @UseInterceptors(
@@ -98,6 +98,19 @@ export class AdminDistributorGroupsController {
     @UploadedFile() file?: Express.Multer.File,
   ) {
     return this.access.importGroupProductsXlsx({ groupId: id, fileBuffer: file?.buffer ?? Buffer.alloc(0), mode });
+  }
+
+  @ApiOperation({ summary: '管理员：获取分组专属定价列表' })
+  @Get(':id/prices')
+  getPrices(@Param('id') id: string) {
+    return this.access.getGroupPrices(id);
+  }
+
+  @ApiOperation({ summary: '管理员：删除分组某个 SKU 的专属定价（按前缀）' })
+  @HttpCode(200)
+  @Delete(':id/prices/:sku')
+  deletePrice(@Param('id') id: string, @Param('sku') sku: string) {
+    return this.access.deleteGroupPrice(id, sku);
   }
 }
 

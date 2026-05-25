@@ -7,10 +7,16 @@ import { EbayProduct } from '../products/ebay-product.entity';
 import { User } from '../users/user.entity';
 import { DistributorGroup } from './distributor-group.entity';
 import { DistributorGroupMember } from './distributor-group-member.entity';
+import { DistributorGroupPrice } from './distributor-group-price.entity';
 import { EbayProductVisibilityGroup } from './ebay-product-visibility-group.entity';
 
 function normalizeSku(sku: string): string {
   return String(sku ?? '').trim().toLowerCase();
+}
+
+function skuPrefix(sku: string): string {
+  const parts = String(sku).trim().split('-');
+  return parts.slice(0, 2).join('-').toLowerCase();
 }
 
 @Injectable()
@@ -18,6 +24,7 @@ export class AccessControlService {
   constructor(
     @InjectRepository(DistributorGroup) private readonly groupRepo: Repository<DistributorGroup>,
     @InjectRepository(DistributorGroupMember) private readonly memberRepo: Repository<DistributorGroupMember>,
+    @InjectRepository(DistributorGroupPrice) private readonly groupPriceRepo: Repository<DistributorGroupPrice>,
     @InjectRepository(EbayProductVisibilityGroup) private readonly pvgRepo: Repository<EbayProductVisibilityGroup>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(EbayProduct) private readonly productRepo: Repository<EbayProduct>,
@@ -208,6 +215,65 @@ export class AccessControlService {
     return { totalRows: normList.length, bound: productIds.length, missing };
   }
 
+  async setGroupPrices(groupId: string, priceMap: Map<string, string>) {
+    const entries = Array.from(priceMap.entries()).filter(([sku]) => String(sku).trim());
+    if (entries.length === 0) return { updated: 0 };
+
+    const rows = entries.map(([sku, price]) => ({
+      groupId,
+      sku: String(sku).trim(),
+      price,
+    }));
+
+    await this.groupPriceRepo
+      .createQueryBuilder()
+      .insert()
+      .into(DistributorGroupPrice)
+      .values(rows as unknown as Record<string, unknown>[])
+      .orUpdate(['price', 'updated_at'], ['group_id', 'sku'])
+      .execute();
+
+    return { updated: rows.length };
+  }
+
+  async getGroupPrices(groupId: string): Promise<Array<{ sku: string; price: string }>> {
+    const rows = await this.groupPriceRepo.find({ where: { groupId }, order: { sku: 'ASC' } });
+    return rows.map((r) => ({ sku: r.sku, price: r.price }));
+  }
+
+  async deleteGroupPrice(groupId: string, sku: string): Promise<boolean> {
+    const prefix = skuPrefix(sku);
+    const result = await this.groupPriceRepo
+      .createQueryBuilder()
+      .delete()
+      .where('group_id = :groupId', { groupId })
+      .andWhere("LOWER(SUBSTRING_INDEX(TRIM(sku), '-', 2)) = :prefix", { prefix })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /** 获取用户所属组对所有 SKU 前缀的定价 */
+  async getUserGroupPrices(userId: string): Promise<Map<string, string>> {
+    const groupIds = await this.getUserGroupIds(userId);
+    if (groupIds.length === 0) return new Map();
+
+    const rows = await this.groupPriceRepo
+      .createQueryBuilder('p')
+      .where('p.groupId IN (:...groupIds)', { groupIds })
+      .getMany();
+
+    // 按前缀取最低价（同一前缀多组时取最低）
+    const map = new Map<string, string>();
+    for (const r of rows) {
+      const prefix = skuPrefix(r.sku);
+      const existing = map.get(prefix);
+      if (existing === undefined || Number(r.price) < Number(existing)) {
+        map.set(prefix, r.price);
+      }
+    }
+    return map;
+  }
+
   async importGroupProductsXlsx(args: { groupId: string; fileBuffer: Buffer; mode?: 'replace' | 'add' | 'remove' }) {
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(args.fileBuffer as unknown as ArrayBuffer);
@@ -215,16 +281,44 @@ export class AccessControlService {
     if (!ws) throw new BadRequestException('Excel 文件为空');
 
     const skus: string[] = [];
+    const priceMap = new Map<string, string>();
+
+    const headerRow = ws.getRow(1);
+    const headerValues = (headerRow.values as Array<string | number | null | undefined>)
+      .slice(1)
+      .map((v) => String(v ?? '').trim().toLowerCase());
+
+    const hasPriceCol = headerValues.some((h) => h === 'price' || h === '价格' || h === '售价');
+    const priceCol = hasPriceCol ? headerValues.findIndex((h) => h === 'price' || h === '价格' || h === '售价') + 1 : -1;
+
     ws.eachRow((row, rowNumber) => {
       if (rowNumber === 1) {
         const first = String(row.getCell(1).text ?? '').trim().toLowerCase();
         if (first.includes('sku')) return;
       }
       const sku = String(row.getCell(1).text ?? '').trim();
-      if (sku) skus.push(sku);
+      if (!sku) return;
+      skus.push(sku);
+
+      if (priceCol > 0) {
+        const priceRaw = row.getCell(priceCol).value;
+        if (priceRaw !== null && priceRaw !== undefined && String(priceRaw).trim()) {
+          const n = Number(String(priceRaw).trim().replace(/,/g, ''));
+          if (Number.isFinite(n)) priceMap.set(sku, n.toFixed(2));
+        }
+      }
     });
 
     const mode = (args.mode ?? 'replace').toLowerCase();
+
+    // 处理定价
+    if (priceMap.size > 0) {
+      if (mode === 'replace') {
+        await this.groupPriceRepo.delete({ groupId: args.groupId });
+      }
+      await this.setGroupPrices(args.groupId, priceMap);
+    }
+
     if (mode === 'replace') return this.setGroupProductsBySkus(args.groupId, skus);
 
     const g = await this.groupRepo.findOne({ where: { id: args.groupId } });

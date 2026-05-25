@@ -38,6 +38,9 @@ export function DistributorGroupsPage() {
   const [productsText, setProductsText] = useState('');
   const [productsSaving, setProductsSaving] = useState(false);
 
+  const [pricesLoading, setPricesLoading] = useState(false);
+  const [prices, setPrices] = useState<Array<{ sku: string; price: string }>>([]);
+
   const loadGroups = async () => {
     setLoading(true);
     try {
@@ -93,10 +96,20 @@ export function DistributorGroupsPage() {
     void loadDistributors();
   }, []);
 
+  const loadPrices = async (groupId: string) => {
+    setPricesLoading(true);
+    try {
+      const res = await adminApi.getGroupPrices(groupId);
+      setPrices(res);
+    } catch { setPrices([]); }
+    finally { setPricesLoading(false); }
+  };
+
   useEffect(() => {
     if (!selectedGroupId) return;
     void loadMembers(selectedGroupId);
     void loadProducts(selectedGroupId);
+    void loadPrices(selectedGroupId);
   }, [selectedGroupId]);
 
   const openCreate = () => {
@@ -364,8 +377,61 @@ export function DistributorGroupsPage() {
                     disabled={!selectedGroupId || productsLoading}
                   />
                   <Typography.Text type="secondary">
-                    规则：商品未分配到任何分组时，默认所有分销商可见；商品分配到分组后，仅该分组成员可见。
+                    规则：商品未分配到任何分组时，默认所有分销商可见；商品分配到分组后，仅该分组成员可见。<br/>
+                    Excel 格式：第 1 列 SKU，第 2 列 price（可选，填入则覆盖该组的专属定价）。
                   </Typography.Text>
+                </Space>
+              </Card>
+            ),
+          },
+          {
+            key: 'prices',
+            label: '专属定价',
+            children: (
+              <Card variant="borderless">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <Typography.Text type="secondary">
+                    专属定价优先于基础定价。若设置了专属价格，分销商将看到专属价格而非基础价格。未设置的商品使用基础定价。
+                  </Typography.Text>
+                  <Table
+                    rowKey="sku"
+                    loading={pricesLoading}
+                    dataSource={prices}
+                    columns={[
+                      { title: 'SKU', dataIndex: 'sku', key: 'sku' },
+                      { title: '专属价格 (RMB)', dataIndex: 'price', key: 'price', width: 160 },
+                      {
+                        title: '操作',
+                        key: 'actions',
+                        width: 100,
+                        render: (_: unknown, row: { sku: string }) => (
+                          <Button
+                            size="small"
+                            danger
+                            onClick={() => {
+                              if (!selectedGroupId) return;
+                              Modal.confirm({
+                                title: '删除专属定价',
+                                content: `确认删除 ${row.sku} 的专属定价？`,
+                                okText: '删除',
+                                okButtonProps: { danger: true },
+                                cancelText: '取消',
+                                onOk: async () => {
+                                  await adminApi.deleteGroupPrice(selectedGroupId!, row.sku);
+                                  message.success('已删除');
+                                  await loadPrices(selectedGroupId!);
+                                },
+                              });
+                            }}
+                          >
+                            删除
+                          </Button>
+                        ),
+                      },
+                    ]}
+                    pagination={false}
+                    locale={{ emptyText: '暂无专属定价，上传 Excel 时填入 price 列即可自动创建' }}
+                  />
                 </Space>
               </Card>
             ),

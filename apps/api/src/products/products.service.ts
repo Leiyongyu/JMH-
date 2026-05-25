@@ -107,6 +107,12 @@ export class ProductsService {
     const sortBy = q.sortBy ?? 'stockQty';
     const whereParts: string[] = [];
     const whereParams: unknown[] = [];
+
+    // 获取分销商分组专属定价
+    const groupPrices = user.role !== 'ADMIN'
+      ? await this.access.getUserGroupPrices(user.sub)
+      : new Map<string, string>();
+
     if (user.role !== 'ADMIN') {
       const groupIds = await this.access.getUserGroupIds(user.sub);
       if (groupIds.length > 0) {
@@ -230,6 +236,10 @@ export class ProductsService {
               ? new Date(0).toISOString()
               : String(syncedAt);
 
+      const rowSku = String((r as any).sku ?? '');
+      const rowPrefix = rowSku.split('-').slice(0, 2).join('-').toLowerCase();
+      const groupPrice = groupPrices.get(rowPrefix);
+
       const rawObj = this.coerceJsonObject((r as any).rawPayload) ?? null;
       const mergedRaw = rawObj ? { ...rawObj } : {};
       const stockQty = Number((r as any).stockQty ?? 0);
@@ -242,7 +252,7 @@ export class ProductsService {
         availableQty: stockQty,
         price: String((r as any).price ?? '0'),
         currency: String((r as any).currency ?? 'USD'),
-        rmbPrice: (r as any).rmbPrice === null || (r as any).rmbPrice === undefined ? null : String((r as any).rmbPrice),
+        rmbPrice: groupPrice !== undefined ? groupPrice : ((r as any).rmbPrice === null || (r as any).rmbPrice === undefined ? null : String((r as any).rmbPrice)),
         itemUrl: (r as any).itemUrl === null || (r as any).itemUrl === undefined ? null : String((r as any).itemUrl),
         syncedAt: normalizedSyncedAt,
         status: (r as any).status === null || (r as any).status === undefined ? 'ACTIVE' : String((r as any).status),

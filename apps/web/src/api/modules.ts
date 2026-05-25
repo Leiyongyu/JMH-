@@ -168,6 +168,14 @@ export const adminApi = {
       .then((r) => r.data);
   },
 
+  getGroupPrices: (groupId: string) =>
+    api.get<Array<{ sku: string; price: string }>>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices`).then((r) => r.data),
+
+  deleteGroupPrice: (groupId: string, sku: string) =>
+    api
+      .delete<{ deleted: boolean }>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices/${encodeURIComponent(sku)}`)
+      .then((r) => r.data),
+
   deletePriceSelection: (sku: string) =>
     api.delete<{ prefix: string; deleted: number }>(`/admin/products/ebay/price-selection/${encodeURIComponent(sku)}`).then((r) => r.data),
 
