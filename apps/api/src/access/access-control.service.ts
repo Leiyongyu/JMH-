@@ -140,19 +140,15 @@ export class AccessControlService {
   async listGroupProductSkus(groupId: string) {
     const g = await this.groupRepo.findOne({ where: { id: groupId } });
     if (!g) throw new NotFoundException('组不存在');
-    const links = await this.pvgRepo.find({ where: { groupId } });
+    const links = await this.pvgRepo.find({ where: { groupId }, order: { createdAt: 'ASC' } });
     if (links.length === 0) return [];
     const productIds = Array.from(new Set(links.map((x) => x.productId)));
     const products = await this.productRepo.find({ where: { id: In(productIds) } });
     const map = new Map(products.map((p) => [p.id, p]));
     const out: string[] = [];
-    const seen = new Set<string>();
     for (const id of productIds) {
       const p = map.get(id);
-      if (!p) continue;
-      const norm = normalizeSku(p.sku);
-      if (!norm || seen.has(norm)) continue;
-      seen.add(norm);
+      if (!p || !p.sku) continue;
       out.push(p.sku);
     }
     return out;
@@ -161,19 +157,20 @@ export class AccessControlService {
   async setGroupProductsBySkus(groupId: string, skus: string[]) {
     const g = await this.groupRepo.findOne({ where: { id: groupId } });
     if (!g) throw new NotFoundException('组不存在');
-    const normMap = new Map<string, string>();
+    const prefixMap = new Map<string, string>(); // prefix → original SKU
     for (const raw of skus ?? []) {
       const s = String(raw ?? '').trim();
       if (!s) continue;
-      const norm = normalizeSku(s);
-      if (!normMap.has(norm)) normMap.set(norm, s);
+      const pfx = skuPrefix(s);
+      if (!prefixMap.has(pfx)) prefixMap.set(pfx, s);
     }
-    const normList = Array.from(normMap.keys());
-    if (normList.length === 0) {
+    const prefixList = Array.from(prefixMap.keys());
+    if (prefixList.length === 0) {
       await this.pvgRepo.delete({ groupId });
       return { totalRows: 0, bound: 0, missing: [] as string[] };
     }
 
+    // 按前缀匹配 ebay_products（与列表页规则一致）
     const products = await this.ds.query(
       `
       SELECT id, TRIM(sku) AS sku
@@ -183,22 +180,22 @@ export class AccessControlService {
           p.sku AS sku,
           ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
         FROM ebay_products p
-        WHERE LOWER(TRIM(p.sku)) IN (?)
+        WHERE LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (?)
       ) t
       WHERE t.rn = 1
       `,
-      [normList],
+      [prefixList],
     );
     const productIds: string[] = [];
-    const foundNorm = new Set<string>();
+    const foundPrefixes = new Set<string>();
     for (const row of products as Array<{ id?: string; sku?: string }>) {
       const id = String(row?.id ?? '').trim();
       const sku = String(row?.sku ?? '').trim();
       if (!id || !sku) continue;
       productIds.push(id);
-      foundNorm.add(normalizeSku(sku));
+      foundPrefixes.add(skuPrefix(sku));
     }
-    const missing = normList.filter((n) => !foundNorm.has(n)).map((n) => normMap.get(n) ?? n);
+    const missing = prefixList.filter((p) => !foundPrefixes.has(p)).map((p) => prefixMap.get(p) ?? p);
 
     await this.ds.transaction(async (tx) => {
       await tx.getRepository(EbayProductVisibilityGroup).delete({ groupId });
@@ -321,35 +318,53 @@ export class AccessControlService {
 
     const mode = (args.mode ?? 'replace').toLowerCase();
 
-    // 处理定价
-    if (priceMap.size > 0) {
-      if (mode === 'replace') {
-        await this.groupPriceRepo.delete({ groupId: args.groupId });
-      }
-      await this.setGroupPrices(args.groupId, priceMap);
+    // 先处理可见商品绑定（前缀匹配）
+    let visibilityResult: { totalRows: number; bound: number; missing: string[] };
+    if (mode === 'replace') {
+      visibilityResult = await this.setGroupProductsBySkus(args.groupId, skus);
+    } else {
+      const g = await this.groupRepo.findOne({ where: { id: args.groupId } });
+      if (!g) throw new NotFoundException('组不存在');
+      const existingLinks = await this.pvgRepo.find({ where: { groupId: args.groupId } });
+      const existingProductIds = new Set(existingLinks.map((x) => x.productId));
+      const existingProducts = existingProductIds.size
+        ? await this.productRepo.find({ where: { id: In(Array.from(existingProductIds)) } })
+        : [];
+      const existingPrefixes = new Set(existingProducts.map((p) => skuPrefix(p.sku)).filter(Boolean));
+      const incomingPrefixes = new Set(skus.map((s) => skuPrefix(s)).filter(Boolean));
+      const mergedPrefixes =
+        mode === 'add'
+          ? Array.from(new Set([...existingPrefixes, ...incomingPrefixes]))
+          : Array.from(new Set([...existingPrefixes].filter((x) => !incomingPrefixes.has(x))));
+      visibilityResult = await this.setGroupProductsBySkus(args.groupId, mergedPrefixes);
     }
 
-    if (mode === 'replace') return this.setGroupProductsBySkus(args.groupId, skus);
+    // 只保存已匹配到的 SKU 前缀的定价
+    if (priceMap.size > 0) {
+      const boundPrefixes = new Set<string>();
+      // 查出所有已绑定的 product_id → SKU → prefix
+      const links = await this.pvgRepo.find({ where: { groupId: args.groupId } });
+      if (links.length > 0) {
+        const products = await this.productRepo.find({ where: { id: In(links.map((x) => x.productId)) } });
+        for (const p of products) boundPrefixes.add(skuPrefix(p.sku));
+      }
 
-    const g = await this.groupRepo.findOne({ where: { id: args.groupId } });
-    if (!g) throw new NotFoundException('组不存在');
+      const validPriceMap = new Map<string, string>();
+      for (const [sku, price] of priceMap.entries()) {
+        if (boundPrefixes.has(skuPrefix(sku))) {
+          validPriceMap.set(sku, price);
+        }
+      }
 
-    const existingLinks = await this.pvgRepo.find({ where: { groupId: args.groupId } });
-    const existingProductIds = new Set(existingLinks.map((x) => x.productId));
-    const existingProducts = existingProductIds.size
-      ? await this.productRepo.find({ where: { id: In(Array.from(existingProductIds)) } })
-      : [];
-    const existingSkus = new Set(existingProducts.map((p) => normalizeSku(p.sku)));
+      if (validPriceMap.size > 0) {
+        if (mode === 'replace') {
+          await this.groupPriceRepo.delete({ groupId: args.groupId });
+        }
+        await this.setGroupPrices(args.groupId, validPriceMap);
+      }
+    }
 
-    const normIncoming = Array.from(new Set(skus.map((s) => normalizeSku(s)).filter(Boolean)));
-    const mergedNorm =
-      mode === 'add'
-        ? Array.from(new Set([...existingSkus, ...normIncoming]))
-        : mode === 'remove'
-          ? Array.from(new Set([...existingSkus].filter((x) => !new Set(normIncoming).has(x))))
-          : normIncoming;
-
-    return this.setGroupProductsBySkus(args.groupId, mergedNorm);
+    return visibilityResult;
   }
 
   async getUserGroupIds(userId: string): Promise<string[]> {
