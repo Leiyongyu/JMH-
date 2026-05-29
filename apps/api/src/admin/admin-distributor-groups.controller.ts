@@ -112,5 +112,18 @@ export class AdminDistributorGroupsController {
   deletePrice(@Param('id') id: string, @Param('sku') sku: string) {
     return this.access.deleteGroupPrice(id, sku);
   }
+
+  @ApiOperation({ summary: '管理员：手动添加单条专属定价' })
+  @HttpCode(201)
+  @Post(':id/prices')
+  addPrice(@Param('id') id: string, @Body() body: { sku: string; price: string }) {
+    return this.access.addGroupPrice(id, body.sku, body.price);
+  }
+
+  @ApiOperation({ summary: '管理员：未分组商品统计' })
+  @Get('stats/ungrouped')
+  ungroupedStats() {
+    return this.access.getUngroupedStats();
+  }
 }
 

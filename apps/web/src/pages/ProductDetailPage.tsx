@@ -383,7 +383,7 @@ export function ProductDetailPage() {
   }
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <Card
         variant="borderless"
         styles={{ body: { padding: 16 } }}
@@ -402,6 +402,7 @@ export function ProductDetailPage() {
         </Space>
       </Card>
 
+      <div style={{ flex: 1, overflow: 'auto', paddingTop: 16 }}>
       <Card variant="borderless" styles={{ body: { padding: 16 } }} style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.08)' }}>
         <Row gutter={[16, 16]} align="stretch">
           <Col xs={24} lg={14} style={{ display: 'flex' }}>
@@ -625,6 +626,7 @@ export function ProductDetailPage() {
           </Form.Item>
         </Form>
       </Modal>
-    </Space>
+      </div>
+    </div>
   );
 }

@@ -7,29 +7,34 @@ import { EbayProduct } from '../products/ebay-product.entity';
 import { User } from '../users/user.entity';
 import { DistributorGroup } from './distributor-group.entity';
 import { DistributorGroupMember } from './distributor-group-member.entity';
-import { DistributorGroupPrice } from './distributor-group-price.entity';
-import { EbayProductVisibilityGroup } from './ebay-product-visibility-group.entity';
+import { GroupProductSku } from './group-product-sku.entity';
 
 function normalizeSku(sku: string): string {
   return String(sku ?? '').trim().toLowerCase();
 }
 
-function skuPrefix(sku: string): string {
+/** 提取 SKU 中间码（前两段，小写），如 "bmw-30315" */
+export function skuPrefix(sku: string): string {
   const parts = String(sku).trim().split('-');
   return parts.slice(0, 2).join('-').toLowerCase();
 }
 
 @Injectable()
 export class AccessControlService {
+  // 用户分组定价缓存（30 秒 TTL）
+  private userGroupPricesCache = new Map<string, { at: number; value: Map<string, string> }>();
+  private readonly CACHE_TTL_MS = 30_000;
+
   constructor(
     @InjectRepository(DistributorGroup) private readonly groupRepo: Repository<DistributorGroup>,
     @InjectRepository(DistributorGroupMember) private readonly memberRepo: Repository<DistributorGroupMember>,
-    @InjectRepository(DistributorGroupPrice) private readonly groupPriceRepo: Repository<DistributorGroupPrice>,
-    @InjectRepository(EbayProductVisibilityGroup) private readonly pvgRepo: Repository<EbayProductVisibilityGroup>,
+    @InjectRepository(GroupProductSku) private readonly gpsRepo: Repository<GroupProductSku>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(EbayProduct) private readonly productRepo: Repository<EbayProduct>,
     private readonly ds: DataSource,
   ) {}
+
+  // ─────────────────── 分组 CRUD ───────────────────
 
   async listGroups() {
     return this.groupRepo
@@ -44,11 +49,7 @@ export class AccessControlService {
     const name = String(args.name ?? '').trim();
     if (!code) throw new BadRequestException('code 不能为空');
     if (!name) throw new BadRequestException('name 不能为空');
-    const entity = this.groupRepo.create({
-      code,
-      name,
-      description: args.description ?? null,
-    });
+    const entity = this.groupRepo.create({ code, name, description: args.description ?? null });
     try {
       return await this.groupRepo.save(entity);
     } catch (err) {
@@ -90,11 +91,14 @@ export class AccessControlService {
     if (!g) throw new NotFoundException('组不存在');
     await this.ds.transaction(async (tx) => {
       await tx.getRepository(DistributorGroupMember).delete({ groupId: id });
-      await tx.getRepository(EbayProductVisibilityGroup).delete({ groupId: id });
+      await tx.getRepository(GroupProductSku).delete({ groupId: id });
       await tx.getRepository(DistributorGroup).delete({ id });
     });
+    this.clearGroupPricesCacheForGroup(id);
     return g;
   }
+
+  // ─────────────────── 分组成员 ───────────────────
 
   async listGroupMembers(groupId: string) {
     const g = await this.groupRepo.findOne({ where: { id: groupId } });
@@ -126,160 +130,213 @@ export class AccessControlService {
     await this.ds.transaction(async (tx) => {
       await tx.getRepository(DistributorGroupMember).delete({ groupId });
       if (unique.length) {
-        await tx.getRepository(DistributorGroupMember).insert(
-          unique.map((uid) => ({
-            groupId,
-            userId: uid,
-          })),
-        );
+        await tx.getRepository(DistributorGroupMember).insert(unique.map((uid) => ({ groupId, userId: uid })));
       }
     });
+    this.clearGroupPricesCacheForGroup(groupId);
     return { groupId, userIds: unique };
   }
 
-  async listGroupProductSkus(groupId: string) {
-    const g = await this.groupRepo.findOne({ where: { id: groupId } });
-    if (!g) throw new NotFoundException('组不存在');
-    const links = await this.pvgRepo.find({ where: { groupId }, order: { createdAt: 'ASC' } });
-    if (links.length === 0) return [];
-    const productIds = Array.from(new Set(links.map((x) => x.productId)));
-    const products = await this.productRepo.find({ where: { id: In(productIds) } });
-    const map = new Map(products.map((p) => [p.id, p]));
-    const out: string[] = [];
-    for (const id of productIds) {
-      const p = map.get(id);
-      if (!p || !p.sku) continue;
-      out.push(p.sku);
-    }
-    return out;
+  async getUserGroupIds(userId: string): Promise<string[]> {
+    const rows = await this.memberRepo.find({ where: { userId } });
+    return Array.from(new Set(rows.map((r) => r.groupId))).filter(Boolean);
   }
 
-  async setGroupProductsBySkus(groupId: string, skus: string[]) {
+  // ─────────────────── 分组可见商品（SKU 中间码） ───────────────────
+
+  /** 获取某个分组的可见商品中间码列表 */
+  async listGroupProductSkus(groupId: string): Promise<string[]> {
     const g = await this.groupRepo.findOne({ where: { id: groupId } });
     if (!g) throw new NotFoundException('组不存在');
-    const prefixMap = new Map<string, string>(); // prefix → original SKU
-    for (const raw of skus ?? []) {
+    const rows = await this.gpsRepo.find({ where: { groupId }, order: { skuPrefix: 'ASC' } });
+    return rows.map((r) => r.skuPrefix);
+  }
+
+  /** 设置某个分组的可见商品（按 SKU 中间码，全量覆盖） */
+  async setGroupProductsBySkus(
+    groupId: string,
+    rawSkus: string[],
+  ): Promise<{ totalRows: number; bound: number; missing: string[]; totalProducts: number }> {
+    const g = await this.groupRepo.findOne({ where: { id: groupId } });
+    if (!g) throw new NotFoundException('组不存在');
+
+    // 提取中间码并去重
+    const prefixSet = new Set<string>();
+    for (const raw of rawSkus ?? []) {
       const s = String(raw ?? '').trim();
       if (!s) continue;
-      const pfx = skuPrefix(s);
-      if (!prefixMap.has(pfx)) prefixMap.set(pfx, s);
+      prefixSet.add(skuPrefix(s));
     }
-    const prefixList = Array.from(prefixMap.keys());
-    if (prefixList.length === 0) {
-      await this.pvgRepo.delete({ groupId });
-      return { totalRows: 0, bound: 0, missing: [] as string[] };
+    const prefixes = Array.from(prefixSet);
+
+    if (prefixes.length === 0) {
+      await this.gpsRepo.delete({ groupId });
+      this.clearGroupPricesCacheForGroup(groupId);
+      return { totalRows: 0, bound: 0, missing: [], totalProducts: 0 };
     }
 
-    // 按前缀匹配 ebay_products（与列表页规则一致）
+    // 校验这些中间码在 ebay_products 中是否存在
     const products = await this.ds.query(
-      `
-      SELECT id, TRIM(sku) AS sku
-      FROM (
-        SELECT
-          p.id AS id,
-          p.sku AS sku,
-          ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
-        FROM ebay_products p
-        WHERE LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (?)
-      ) t
-      WHERE t.rn = 1
-      `,
-      [prefixList],
-    );
-    const productIds: string[] = [];
-    const foundPrefixes = new Set<string>();
-    for (const row of products as Array<{ id?: string; sku?: string }>) {
-      const id = String(row?.id ?? '').trim();
-      const sku = String(row?.sku ?? '').trim();
-      if (!id || !sku) continue;
-      productIds.push(id);
-      foundPrefixes.add(skuPrefix(sku));
-    }
-    const missing = prefixList.filter((p) => !foundPrefixes.has(p)).map((p) => prefixMap.get(p) ?? p);
+      `SELECT id, TRIM(sku) AS sku
+       FROM (
+         SELECT p.id, p.sku,
+           ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
+         FROM ebay_products p
+         WHERE LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (?)
+       ) t WHERE t.rn = 1`,
+      [prefixes],
+    ) as Array<{ id?: string; sku?: string }>;
 
+    const foundPrefixes = new Set(
+      products.map((p) => skuPrefix(String(p?.sku ?? ''))).filter(Boolean),
+    );
+    const validPrefixes = prefixes.filter((p) => foundPrefixes.has(p));
+    const missing = prefixes.filter((p) => !foundPrefixes.has(p));
+
+    // 全量替换该组的可见商品
     await this.ds.transaction(async (tx) => {
-      await tx.getRepository(EbayProductVisibilityGroup).delete({ groupId });
-      if (productIds.length) {
-        await tx.getRepository(EbayProductVisibilityGroup).insert(
-          Array.from(new Set(productIds)).map((pid) => ({
-            groupId,
-            productId: pid,
-          })),
+      await tx.getRepository(GroupProductSku).delete({ groupId });
+      if (validPrefixes.length) {
+        await tx.getRepository(GroupProductSku).insert(
+          validPrefixes.map((prefix) => ({ groupId, skuPrefix: prefix, price: null })),
         );
       }
     });
 
-    return { totalRows: normList.length, bound: productIds.length, missing };
+    this.clearGroupPricesCacheForGroup(groupId);
+    return {
+      totalRows: prefixes.length,
+      bound: validPrefixes.length,
+      missing,
+      totalProducts: products.length,
+    };
   }
 
-  async setGroupPrices(groupId: string, priceMap: Map<string, string>) {
-    const entries = Array.from(priceMap.entries()).filter(([sku]) => String(sku).trim());
-    if (entries.length === 0) return { updated: 0 };
+  // ─────────────────── 专属定价 ───────────────────
 
-    const rows = entries.map(([sku, price]) => ({
-      groupId,
-      sku: String(sku).trim(),
-      price,
-    }));
+  /** 获取分组所有可见 SKU 中间码及其价格（含默认价） */
+  async getGroupPrices(groupId: string): Promise<Array<{ sku: string; price: string; source: 'group' | 'default' }>> {
+    const rows = await this.gpsRepo.find({ where: { groupId }, order: { skuPrefix: 'ASC' } });
+    if (rows.length === 0) return [];
 
-    await this.groupPriceRepo
-      .createQueryBuilder()
-      .insert()
-      .into(DistributorGroupPrice)
-      .values(rows as unknown as Record<string, unknown>[])
-      .orUpdate(['price', 'updated_at'], ['group_id', 'sku'])
-      .execute();
+    const prefixes = rows.map((r) => r.skuPrefix);
 
-    return { updated: rows.length };
+    // 默认价格直接取 ebay_products 原价（领星同步，通常 USD）
+    const defaultPriceMap = new Map<string, string>();
+    if (prefixes.length > 0) {
+      const productRows = await this.ds.query(
+        `SELECT
+           SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+           MAX(CAST(COALESCE(price, 0) AS DECIMAL(14,2))) AS price
+         FROM ebay_products
+         WHERE LOWER(SUBSTRING_INDEX(TRIM(sku), '-', 2)) IN (?)
+         GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)`,
+        [prefixes],
+      ) as Array<{ prefix_norm?: string; price?: number }>;
+      for (const r of productRows) {
+        const pfx = String(r?.prefix_norm ?? '').trim();
+        if (pfx) defaultPriceMap.set(pfx, String(r?.price ?? 0));
+      }
+    }
+
+    return rows.map((r) => {
+      const hasGroupPrice = r.price !== null && r.price !== undefined && Number(r.price) > 0;
+      const defaultPrice = defaultPriceMap.get(r.skuPrefix) || '0';
+      return {
+        sku: r.skuPrefix,
+        defaultPrice,
+        groupPrice: hasGroupPrice ? r.price! : null,
+        price: hasGroupPrice ? r.price! : defaultPrice,
+        source: hasGroupPrice ? ('group' as const) : ('default' as const),
+      };
+    });
   }
 
-  async getGroupPrices(groupId: string): Promise<Array<{ sku: string; price: string }>> {
-    // 只返回该分组可见商品中有匹配前缀的定价
-    const pvgLinks = await this.pvgRepo.find({ where: { groupId } });
-    if (pvgLinks.length === 0) return [];
+  /** 手动添加/更新单条专属定价 */
+  async addGroupPrice(groupId: string, sku: string, price: string): Promise<{ sku: string; price: string }> {
+    const g = await this.groupRepo.findOne({ where: { id: groupId } });
+    if (!g) throw new NotFoundException('组不存在');
 
-    const productIds = Array.from(new Set(pvgLinks.map((x) => x.productId)));
-    const products = await this.productRepo.find({ where: { id: In(productIds) } });
-    const boundPrefixes = new Set(products.map((p) => skuPrefix(p.sku)).filter(Boolean));
+    const s = String(sku ?? '').trim();
+    if (!s) throw new BadRequestException('SKU 不能为空');
+    const p = Number(price);
+    if (!Number.isFinite(p) || p < 0) throw new BadRequestException('价格必须为非负数');
 
-    const rows = await this.groupPriceRepo.find({ where: { groupId }, order: { sku: 'ASC' } });
-    return rows
-      .filter((r) => boundPrefixes.has(skuPrefix(r.sku)))
-      .map((r) => ({ sku: r.sku, price: r.price }));
+    const prefix = skuPrefix(s);
+
+    // 校验中间码必须在 ebay_products 中存在
+    const exists = await this.ds.query(
+      `SELECT 1 AS one FROM ebay_products
+       WHERE LOWER(SUBSTRING_INDEX(TRIM(sku), '-', 2)) = ?
+       LIMIT 1`,
+      [prefix],
+    ) as Array<{ one?: unknown }>;
+    if (!exists?.[0]?.one) {
+      throw new BadRequestException(`SKU 中间码 "${prefix}" 在商品表中不存在，请确认 SKU 是否正确`);
+    }
+
+    // 校验中间码必须在该分组的可见商品中
+    const inGroup = await this.gpsRepo.findOne({ where: { groupId, skuPrefix: prefix } });
+    if (!inGroup) {
+      throw new BadRequestException(`SKU 中间码 "${prefix}" 不在该分组的可见商品中，请先在"可见商品"Tab 中添加`);
+    }
+
+    const priceStr = p.toFixed(2);
+    inGroup.price = priceStr;
+    await this.gpsRepo.save(inGroup);
+    this.clearGroupPricesCacheForGroup(groupId);
+
+    return { sku: prefix, price: priceStr };
   }
 
+  /** 删除分组某个 SKU 中间码的专属定价（恢复默认价） */
   async deleteGroupPrice(groupId: string, sku: string): Promise<boolean> {
     const prefix = skuPrefix(sku);
-    const result = await this.groupPriceRepo
-      .createQueryBuilder()
-      .delete()
-      .where('group_id = :groupId', { groupId })
-      .andWhere("LOWER(SUBSTRING_INDEX(TRIM(sku), '-', 2)) = :prefix", { prefix })
-      .execute();
-    return (result.affected ?? 0) > 0;
+    const gps = await this.gpsRepo.findOne({ where: { groupId, skuPrefix: prefix } });
+    if (!gps) return false;
+
+    gps.price = null;
+    await this.gpsRepo.save(gps);
+    this.clearGroupPricesCacheForGroup(groupId);
+    return true;
   }
 
-  /** 获取用户所属组对所有 SKU 前缀的定价 */
+  // ─────────────────── 用户定价查询 + 缓存 ───────────────────
+
+  /** 获取用户所属各组的所有专属定价 */
   async getUserGroupPrices(userId: string): Promise<Map<string, string>> {
     const groupIds = await this.getUserGroupIds(userId);
     if (groupIds.length === 0) return new Map();
 
-    const rows = await this.groupPriceRepo
-      .createQueryBuilder('p')
-      .where('p.groupId IN (:...groupIds)', { groupIds })
-      .getMany();
+    const cacheKey = `${userId}:${groupIds.sort().join(',')}`;
+    const cached = this.userGroupPricesCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < this.CACHE_TTL_MS) {
+      return new Map(cached.value);
+    }
 
-    // 按前缀取最低价（同一前缀多组时取最低）
+    const rows = await this.gpsRepo.find({ where: { groupId: In(groupIds) } });
+
+    // 按中间码取最低价（多组时取低）
     const map = new Map<string, string>();
     for (const r of rows) {
-      const prefix = skuPrefix(r.sku);
-      const existing = map.get(prefix);
+      if (r.price === null || r.price === undefined) continue;
+      const existing = map.get(r.skuPrefix);
       if (existing === undefined || Number(r.price) < Number(existing)) {
-        map.set(prefix, r.price);
+        map.set(r.skuPrefix, r.price);
       }
     }
+
+    this.userGroupPricesCache.set(cacheKey, { at: Date.now(), value: new Map(map) });
     return map;
   }
+
+  private clearGroupPricesCacheForGroup(groupId: string): void {
+    for (const key of this.userGroupPricesCache.keys()) {
+      if (key.includes(groupId)) this.userGroupPricesCache.delete(key);
+    }
+  }
+
+  // ─────────────────── Excel 导入 ───────────────────
 
   async importGroupProductsXlsx(args: { groupId: string; fileBuffer: Buffer; mode?: 'replace' | 'add' | 'remove' }) {
     const wb = new ExcelJS.Workbook();
@@ -287,6 +344,7 @@ export class AccessControlService {
     const ws = wb.worksheets[0];
     if (!ws) throw new BadRequestException('Excel 文件为空');
 
+    // 解析 Excel：第 1 列 SKU，可选第 2 列 price
     const skus: string[] = [];
     const priceMap = new Map<string, string>();
 
@@ -300,7 +358,6 @@ export class AccessControlService {
     let priceCol = hasPriceCol
       ? headerValues.findIndex((h) => h && priceAliases.some((a) => h.includes(a))) + 1
       : -1;
-    // 兜底：如果第 2 列的值看起来像数字，默认它就是价格列
     if (priceCol < 0) {
       const sample = ws.getRow(2)?.getCell(2)?.value ?? ws.getRow(1)?.getCell(2)?.value;
       if (sample !== null && sample !== undefined && Number.isFinite(Number(String(sample).trim().replace(/,/g, '')))) {
@@ -321,91 +378,140 @@ export class AccessControlService {
         const priceRaw = row.getCell(priceCol).value;
         if (priceRaw !== null && priceRaw !== undefined && String(priceRaw).trim()) {
           const n = Number(String(priceRaw).trim().replace(/,/g, ''));
-          if (Number.isFinite(n)) priceMap.set(sku, n.toFixed(2));
+          if (Number.isFinite(n)) priceMap.set(skuPrefix(sku), n.toFixed(2));
         }
       }
     });
 
     const mode = (args.mode ?? 'replace').toLowerCase();
 
-    // 先处理可见商品绑定（前缀匹配）
-    let visibilityResult: { totalRows: number; bound: number; missing: string[] };
-    if (mode === 'replace') {
-      visibilityResult = await this.setGroupProductsBySkus(args.groupId, skus);
+    // 提取中间码并去重
+    const incomingPrefixes = Array.from(new Set(skus.map((s) => skuPrefix(s)).filter(Boolean)));
+
+    // 校验中间码在 ebay_products 中存在
+    let validPrefixes: string[];
+    let missing: string[];
+    if (incomingPrefixes.length > 0) {
+      const products = await this.ds.query(
+        `SELECT TRIM(sku) AS sku
+         FROM (
+           SELECT p.sku,
+             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
+           FROM ebay_products p
+           WHERE LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) IN (?)
+         ) t WHERE t.rn = 1`,
+        [incomingPrefixes],
+      ) as Array<{ sku?: string }>;
+      const found = new Set(products.map((p) => skuPrefix(String(p?.sku ?? ''))).filter(Boolean));
+      validPrefixes = incomingPrefixes.filter((p) => found.has(p));
+      missing = incomingPrefixes.filter((p) => !found.has(p));
     } else {
-      const g = await this.groupRepo.findOne({ where: { id: args.groupId } });
-      if (!g) throw new NotFoundException('组不存在');
-      const existingLinks = await this.pvgRepo.find({ where: { groupId: args.groupId } });
-      const existingProductIds = new Set(existingLinks.map((x) => x.productId));
-      const existingProducts = existingProductIds.size
-        ? await this.productRepo.find({ where: { id: In(Array.from(existingProductIds)) } })
-        : [];
-      const existingPrefixes = new Set(existingProducts.map((p) => skuPrefix(p.sku)).filter(Boolean));
-      const incomingPrefixes = new Set(skus.map((s) => skuPrefix(s)).filter(Boolean));
-      const mergedPrefixes =
-        mode === 'add'
-          ? Array.from(new Set([...existingPrefixes, ...incomingPrefixes]))
-          : Array.from(new Set([...existingPrefixes].filter((x) => !incomingPrefixes.has(x))));
-      visibilityResult = await this.setGroupProductsBySkus(args.groupId, mergedPrefixes);
+      validPrefixes = [];
+      missing = [];
     }
 
-    // 只保存已匹配到的 SKU 前缀的定价
-    if (priceMap.size > 0) {
-      const boundPrefixes = new Set<string>();
-      // 查出所有已绑定的 product_id → SKU → prefix
-      const links = await this.pvgRepo.find({ where: { groupId: args.groupId } });
-      if (links.length > 0) {
-        const products = await this.productRepo.find({ where: { id: In(links.map((x) => x.productId)) } });
-        for (const p of products) boundPrefixes.add(skuPrefix(p.sku));
-      }
+    await this.ds.transaction(async (tx) => {
+      const gpsTx = tx.getRepository(GroupProductSku);
 
-      const validPriceMap = new Map<string, string>();
-      for (const [sku, price] of priceMap.entries()) {
-        if (boundPrefixes.has(skuPrefix(sku))) {
-          validPriceMap.set(sku, price);
+      if (mode === 'replace') {
+        // 全量替换
+        await gpsTx.delete({ groupId: args.groupId });
+        if (validPrefixes.length) {
+          await gpsTx.insert(
+            validPrefixes.map((prefix) => ({
+              groupId: args.groupId,
+              skuPrefix: prefix,
+              price: priceMap.get(prefix) ?? null,
+            })),
+          );
+        }
+      } else if (mode === 'add') {
+        // 增量添加
+        const existingRows = await gpsTx.find({ where: { groupId: args.groupId } });
+        const existingPrefixes = new Set(existingRows.map((r) => r.skuPrefix));
+        const newPrefixes = validPrefixes.filter((p) => !existingPrefixes.has(p));
+        if (newPrefixes.length) {
+          await gpsTx.insert(
+            newPrefixes.map((prefix) => ({
+              groupId: args.groupId,
+              skuPrefix: prefix,
+              price: priceMap.get(prefix) ?? null,
+            })),
+          );
+        }
+        // 更新已有行的定价（如果 Excel 有填价格）
+        for (const r of existingRows) {
+          const newPrice = priceMap.get(r.skuPrefix);
+          if (newPrice !== undefined) {
+            r.price = newPrice;
+            await gpsTx.save(r);
+          }
+        }
+      } else if (mode === 'remove') {
+        // 移除指定中间码
+        if (incomingPrefixes.length) {
+          await gpsTx.delete({ groupId: args.groupId, skuPrefix: In(incomingPrefixes) });
         }
       }
+    });
 
-      if (validPriceMap.size > 0) {
-        if (mode === 'replace') {
-          await this.groupPriceRepo.delete({ groupId: args.groupId });
-        }
-        await this.setGroupPrices(args.groupId, validPriceMap);
-      }
-    }
+    this.clearGroupPricesCacheForGroup(args.groupId);
 
-    return visibilityResult;
+    const boundProducts = validPrefixes.length > 0
+      ? await this.ds.query(
+          `SELECT COUNT(1) AS c FROM (
+             SELECT 1 FROM ebay_products
+             WHERE LOWER(SUBSTRING_INDEX(TRIM(sku), '-', 2)) IN (?)
+             LIMIT 1000
+           ) t`,
+          [validPrefixes],
+        )
+      : [{ c: 0 }];
+
+    return {
+      totalRows: incomingPrefixes.length,
+      bound: validPrefixes.length,
+      missing,
+      totalProducts: Number((boundProducts as Array<{ c?: number }>)?.[0]?.c ?? 0),
+    };
   }
 
-  async getUserGroupIds(userId: string): Promise<string[]> {
-    const rows = await this.memberRepo.find({ where: { userId } });
-    return Array.from(new Set(rows.map((r) => r.groupId))).filter(Boolean);
+  // ─────────────────── 统计 ───────────────────
+
+  /** 未分组商品统计 */
+  async getUngroupedStats(): Promise<{ totalProducts: number; groupedProducts: number; ungroupedProducts: number }> {
+    const total = await this.productRepo.createQueryBuilder('p').select('COUNT(1)', 'c').getRawOne<{ c: number }>();
+    const totalProducts = Number(total?.c ?? 0);
+
+    // 有至少一个分组的商品数（按实际商品去重）
+    const grouped = await this.ds.query(
+      `SELECT COUNT(DISTINCT p.id) AS c
+       FROM ebay_products p
+       INNER JOIN group_product_skus gps
+         ON LOWER(SUBSTRING_INDEX(TRIM(p.sku), '-', 2)) = gps.sku_prefix`,
+    ) as Array<{ c?: number }>;
+    const groupedProducts = Number(grouped?.[0]?.c ?? 0);
+
+    return { totalProducts, groupedProducts, ungroupedProducts: Math.max(0, totalProducts - groupedProducts) };
   }
 
+  // ─────────────────── 可见性判断 ───────────────────
+
+  /** 判断某个 SKU 对用户是否可见 */
   async isEbaySkuVisibleToUser(sku: string, user: JwtUser): Promise<boolean> {
     if (user.role === 'ADMIN') return true;
-    const skuNorm = normalizeSku(sku);
-    if (!skuNorm) return false;
-    const rows = (await this.ds.query(
-      `SELECT id FROM ebay_products WHERE (LOWER(TRIM(sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci) ORDER BY updated_at DESC, created_at DESC LIMIT 1`,
-      [skuNorm],
-    )) as Array<{ id?: string }>;
-    const productId = String(rows?.[0]?.id ?? '').trim();
-    if (!productId) return false;
-
-    const hasRule = (await this.ds.query(
-      `SELECT 1 AS one FROM ebay_product_visibility_groups WHERE product_id=? LIMIT 1`,
-      [productId],
-    )) as Array<{ one?: unknown }>;
-    if (!hasRule?.[0]?.one) return true;
+    const prefix = skuPrefix(sku);
+    if (!prefix) return false;
 
     const groupIds = await this.getUserGroupIds(user.sub);
-    if (groupIds.length === 0) return false;
-    const allowed = (await this.ds.query(
-      `SELECT 1 AS one FROM ebay_product_visibility_groups WHERE product_id=? AND group_id IN (?) LIMIT 1`,
-      [productId, groupIds],
-    )) as Array<{ one?: unknown }>;
-    return Boolean(allowed?.[0]?.one);
+    // 无分组用户：所有商品可见
+    if (groupIds.length === 0) return true;
+
+    // 有分组用户：检查中间码是否在 group_product_skus 中
+    const row = await this.gpsRepo.findOne({
+      where: { skuPrefix: prefix, groupId: In(groupIds) },
+    });
+    return !!row;
   }
 
   async assertEbaySkuVisibleToUser(sku: string, user: JwtUser): Promise<void> {

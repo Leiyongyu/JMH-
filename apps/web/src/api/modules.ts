@@ -169,12 +169,18 @@ export const adminApi = {
   },
 
   getGroupPrices: (groupId: string) =>
-    api.get<Array<{ sku: string; price: string }>>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices`).then((r) => r.data),
+    api.get<Array<{ sku: string; defaultPrice: string; groupPrice: string | null; price: string; source: 'group' | 'default' }>>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices`).then((r) => r.data),
+
+  addGroupPrice: (groupId: string, sku: string, price: string) =>
+    api.post<{ sku: string; price: string }>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices`, { sku, price }).then((r) => r.data),
 
   deleteGroupPrice: (groupId: string, sku: string) =>
     api
       .delete<{ deleted: boolean }>(`/admin/distributor-groups/${encodeURIComponent(groupId)}/prices/${encodeURIComponent(sku)}`)
       .then((r) => r.data),
+
+  getUngroupedStats: () =>
+    api.get<{ totalProducts: number; groupedProducts: number; ungroupedProducts: number }>('/admin/distributor-groups/stats/ungrouped').then((r) => r.data),
 
   deletePriceSelection: (sku: string) =>
     api.delete<{ prefix: string; deleted: number }>(`/admin/products/ebay/price-selection/${encodeURIComponent(sku)}`).then((r) => r.data),

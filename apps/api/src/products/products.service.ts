@@ -105,125 +105,109 @@ export class ProductsService {
     const kwNorm = kw ? kw.trim().toLowerCase() : '';
     const order = String(q.sortOrder ?? 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
     const sortBy = q.sortBy ?? 'stockQty';
+
+    // 获取分销商分组 ID 和专属定价
+    const groupIds = user.role !== 'ADMIN' ? await this.access.getUserGroupIds(user.sub) : [];
+    const hasGroups = groupIds.length > 0;
+    const groupPrices = hasGroups ? await this.access.getUserGroupPrices(user.sub) : new Map<string, string>();
+
+    // 关键词搜索
     const whereParts: string[] = [];
-    const whereParams: unknown[] = [];
-
-    // 获取分销商分组专属定价
-    const groupPrices = user.role !== 'ADMIN'
-      ? await this.access.getUserGroupPrices(user.sub)
-      : new Map<string, string>();
-
-    if (user.role !== 'ADMIN') {
-      const groupIds = await this.access.getUserGroupIds(user.sub);
-      if (groupIds.length > 0) {
-        whereParts.push(`(
-          NOT EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg WHERE pvg.product_id = p.id)
-          OR EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg2 WHERE pvg2.product_id = p.id AND pvg2.group_id IN (?))
-        )`);
-        whereParams.push(groupIds);
-      } else {
-        whereParts.push(`(
-          NOT EXISTS (SELECT 1 FROM ebay_product_visibility_groups pvg WHERE pvg.product_id = p.id)
-        )`);
-      }
-    }
+    const allParams: unknown[] = [];
     if (kw) {
       whereParts.push(`(
         (p.sku_norm COLLATE utf8mb4_unicode_ci) LIKE (? COLLATE utf8mb4_unicode_ci)
         OR LOWER(COALESCE(p.title, '')) LIKE LOWER(?)
       )`);
-      whereParams.push(`%${kwNorm}%`, `%${kw}%`);
+      allParams.push(`%${kwNorm}%`, `%${kw}%`);
     }
     const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
+    // 根据是否有分组，构建不同的 JOIN 和 SELECT
+    const groupJoin = hasGroups
+      ? `INNER JOIN group_product_skus gps ON p.prefix_norm COLLATE utf8mb4_unicode_ci = gps.sku_prefix COLLATE utf8mb4_unicode_ci AND gps.group_id IN (${groupIds.map(() => '?').join(',')})`
+      : '';
+    const rmbPriceExpr = hasGroups
+      ? 'CAST(COALESCE(gps.price, p.price, 0) AS CHAR)'
+      : 'CAST(COALESCE(s.price, p.price, 0) AS CHAR)';
+    const priceSortExpr = hasGroups
+      ? 'CAST(COALESCE(gps.price, p.price, 0) AS DECIMAL(14,2))'
+      : 'CAST(COALESCE(s.price, p.price, 0) AS DECIMAL(14,2))';
+
+    if (hasGroups) allParams.unshift(...groupIds);
+
+    // 共用子查询
+    const productSubquery = `(
+      SELECT *
+      FROM (
+        SELECT
+          p.*,
+          LOWER(TRIM(p.sku)) AS sku_norm,
+          SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) AS prefix_norm,
+          ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
+        FROM ebay_products p
+      ) t
+      WHERE t.rn = 1
+    ) p`;
+
+    const priceSelectionJoin = `LEFT JOIN (
+      SELECT
+        SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
+        MAX(COALESCE(price, 0)) AS price
+      FROM ebay_sku_price_selections
+      GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
+    ) s ON p.prefix_norm COLLATE utf8mb4_unicode_ci = (s.prefix_norm COLLATE utf8mb4_unicode_ci)`;
+
+    const inventoryJoin = `LEFT JOIN (
+      SELECT sku, SUM(available_qty) AS availableQty
+      FROM inventory_lines
+      WHERE platform='LINGXING'
+        AND warehouse_name IS NOT NULL
+        AND TRIM(warehouse_name) <> ''
+      GROUP BY sku
+    ) inv ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (p.sku_norm COLLATE utf8mb4_unicode_ci)`;
+
     const sortableMap: Record<string, string> = {
       stockQty: 'COALESCE(inv.availableQty, 0)',
-      price: 'CAST(COALESCE(s.price, 0) AS DECIMAL(14,2))',
+      price: priceSortExpr,
       sku: 'p.sku',
       syncedAt: 'COALESCE(p.updated_at, p.synced_at)',
     };
     const sortable = sortableMap[String(sortBy)] ?? sortableMap.stockQty;
     const orderSql = `${sortable} ${order}, p.sku ASC`;
 
-    const totalRow = await this.ds.query(
-      `
-      SELECT COUNT(1) AS c
-      FROM (
-        SELECT
-          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
-          MAX(COALESCE(price, 0)) AS price
-        FROM ebay_sku_price_selections
-        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
-      ) s
-      INNER JOIN (
-        SELECT *
-        FROM (
-          SELECT
-            p.*,
-            LOWER(TRIM(p.sku)) AS sku_norm,
-            SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) AS prefix_norm,
-            ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
-          FROM ebay_products p
-        ) t
-        WHERE t.rn = 1
-      ) p
-        ON p.prefix_norm COLLATE utf8mb4_unicode_ci = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
-      ${whereSql}
-      `,
-      whereParams,
-    );
+    // COUNT 查询
+    const countSql = [
+      'SELECT COUNT(1) AS c FROM', productSubquery,
+      groupJoin,
+      priceSelectionJoin,
+      whereSql,
+    ].filter(Boolean).join(' ');
+    const totalRow = await this.ds.query(countSql, allParams);
     const total = Number(totalRow?.[0]?.c ?? 0);
 
+    // 主查询
     const offset = (page - 1) * pageSize;
-    const rows = (await this.ds.query(
-      `
-      SELECT
-        p.id AS id,
-        TRIM(p.sku) AS sku,
-        p.title AS title,
-        COALESCE(p.item_url, '') AS itemUrl,
-        COALESCE(p.status, 'ACTIVE') AS status,
-        p.raw_payload AS rawPayload,
-        CAST(COALESCE(p.price, 0) AS CHAR) AS price,
-        COALESCE(NULLIF(TRIM(p.currency), ''), 'USD') AS currency,
-        CAST(COALESCE(s.price, 0) AS CHAR) AS rmbPrice,
-        COALESCE(inv.availableQty, 0) AS stockQty,
-        COALESCE(p.updated_at, p.synced_at) AS syncedAt
-      FROM (
-        SELECT
-          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
-          MAX(COALESCE(price, 0)) AS price
-        FROM ebay_sku_price_selections
-        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
-      ) s
-      INNER JOIN (
-        SELECT *
-        FROM (
-          SELECT
-            p.*,
-            LOWER(TRIM(p.sku)) AS sku_norm,
-            SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) AS prefix_norm,
-            ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(p.sku)) ORDER BY p.updated_at DESC, p.created_at DESC) AS rn
-          FROM ebay_products p
-        ) t
-        WHERE t.rn = 1
-      ) p
-        ON p.prefix_norm COLLATE utf8mb4_unicode_ci = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
-      LEFT JOIN (
-        SELECT sku, SUM(available_qty) AS availableQty
-        FROM inventory_lines
-        WHERE platform='LINGXING'
-          AND warehouse_name IS NOT NULL
-          AND TRIM(warehouse_name) <> ''
-        GROUP BY sku
-      ) inv
-        ON (LOWER(TRIM(inv.sku)) COLLATE utf8mb4_unicode_ci) = (p.sku_norm COLLATE utf8mb4_unicode_ci)
-      ${whereSql}
-      ORDER BY ${orderSql}
-      LIMIT ? OFFSET ?
-      `,
-      whereParams.concat([pageSize, offset]),
-    )) as any[];
+    const mainSql = [
+      'SELECT',
+      '  p.id AS id, TRIM(p.sku) AS sku, p.title AS title,',
+      '  COALESCE(p.item_url, \'\') AS itemUrl,',
+      '  COALESCE(p.status, \'ACTIVE\') AS status,',
+      '  p.raw_payload AS rawPayload,',
+      '  CAST(COALESCE(p.price, 0) AS CHAR) AS price,',
+      '  COALESCE(NULLIF(TRIM(p.currency), \'\'), \'USD\') AS currency,',
+      `  ${rmbPriceExpr} AS rmbPrice,`,
+      '  COALESCE(inv.availableQty, 0) AS stockQty,',
+      '  COALESCE(p.updated_at, p.synced_at) AS syncedAt',
+      'FROM', productSubquery,
+      groupJoin,
+      priceSelectionJoin,
+      inventoryJoin,
+      whereSql,
+      `ORDER BY ${orderSql}`,
+      'LIMIT ? OFFSET ?',
+    ].filter(Boolean).join(' ');
+    const rows = (await this.ds.query(mainSql, allParams.concat([pageSize, offset]))) as any[];
 
     const items = rows.map((r) => {
       const syncedAt = (r as { syncedAt?: unknown })?.syncedAt;
@@ -324,11 +308,11 @@ export class ProductsService {
         p.raw_payload AS rawPayload,
         CAST(COALESCE(p.price, 0) AS CHAR) AS price,
         COALESCE(NULLIF(TRIM(p.currency), ''), 'USD') AS currency,
-        CAST(COALESCE(s.price, 0) AS CHAR) AS rmbPrice,
+        CAST(COALESCE(s.price, p.price, 0) AS CHAR) AS rmbPrice,
         COALESCE(inv.availableQty, 0) AS stockQty,
         COALESCE(p.updated_at, p.synced_at) AS syncedAt
       FROM ebay_products p
-      INNER JOIN (
+      LEFT JOIN (
         SELECT
           SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
           MAX(COALESCE(price, 0)) AS price
