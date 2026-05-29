@@ -288,8 +288,18 @@ export class AccessControlService {
       .slice(1)
       .map((v) => String(v ?? '').trim().toLowerCase());
 
-    const hasPriceCol = headerValues.some((h) => h === 'price' || h === '价格' || h === '售价');
-    const priceCol = hasPriceCol ? headerValues.findIndex((h) => h === 'price' || h === '价格' || h === '售价') + 1 : -1;
+    const priceAliases = ['price', '价格', '售价', '定价', '单价', '分销价', 'rmb'];
+    const hasPriceCol = headerValues.some((h) => h && priceAliases.some((a) => h.includes(a)));
+    let priceCol = hasPriceCol
+      ? headerValues.findIndex((h) => h && priceAliases.some((a) => h.includes(a))) + 1
+      : -1;
+    // 兜底：如果第 2 列的值看起来像数字，默认它就是价格列
+    if (priceCol < 0) {
+      const sample = ws.getRow(2)?.getCell(2)?.value ?? ws.getRow(1)?.getCell(2)?.value;
+      if (sample !== null && sample !== undefined && Number.isFinite(Number(String(sample).trim().replace(/,/g, '')))) {
+        priceCol = 2;
+      }
+    }
 
     ws.eachRow((row, rowNumber) => {
       if (rowNumber === 1) {
