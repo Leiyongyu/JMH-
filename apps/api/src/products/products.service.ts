@@ -386,26 +386,57 @@ export class ProductsService {
     const rows = (await this.ds.query(
       `
       SELECT
-        COALESCE(NULLIF(TRIM(p.item_url), ''), '') AS itemUrl
+        p.id AS id,
+        COALESCE(NULLIF(TRIM(p.item_url), ''), '') AS itemUrl,
+        p.raw_payload AS rawPayload
       FROM ebay_products p
-      INNER JOIN (
-        SELECT
-          SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2) AS prefix_norm,
-          MAX(COALESCE(price, 0)) AS price
-        FROM ebay_sku_price_selections
-        GROUP BY SUBSTRING_INDEX(LOWER(TRIM(sku)), '-', 2)
-      ) s
-        ON (SUBSTRING_INDEX(LOWER(TRIM(p.sku)), '-', 2) COLLATE utf8mb4_unicode_ci) = (s.prefix_norm COLLATE utf8mb4_unicode_ci)
       WHERE (LOWER(TRIM(p.sku)) COLLATE utf8mb4_unicode_ci) = (? COLLATE utf8mb4_unicode_ci)
       ORDER BY p.updated_at DESC, p.created_at DESC
       `,
       [skuNorm],
-    )) as Array<{ itemUrl?: string | null }>;
+    )) as Array<{ id?: string; itemUrl?: string | null; rawPayload?: unknown }>;
 
     for (const r of rows) {
       const itemUrl = String(r?.itemUrl ?? '').trim();
       if (!itemUrl) continue;
       return itemUrl;
+    }
+
+    for (const r of rows) {
+      const rawObj = this.coerceJsonObject(r?.rawPayload);
+      if (!rawObj) continue;
+
+      const candidates = [
+        rawObj.item_url,
+        rawObj.view_item_url,
+        rawObj.view_url,
+        rawObj.ebay_url,
+        rawObj.listing_url,
+        rawObj.itemWebUrl,
+        rawObj.item_web_url,
+        rawObj.itemUrl,
+        rawObj.url,
+        (rawObj.basic && typeof rawObj.basic === 'object' ? (rawObj.basic as any).itemWebUrl : undefined),
+        (rawObj.basic && typeof rawObj.basic === 'object' ? (rawObj.basic as any).item_web_url : undefined),
+      ];
+      for (const c of candidates) {
+        if (typeof c !== 'string') continue;
+        const u = c.trim();
+        if (!u) continue;
+        try {
+          const parsed = new URL(u);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+          if (r?.id) {
+            await this.ds.query(
+              `UPDATE ebay_products SET item_url=? WHERE id=? AND (item_url IS NULL OR TRIM(item_url)='')`,
+              [u, String(r.id)],
+            );
+          }
+          return u;
+        } catch {
+          continue;
+        }
+      }
     }
 
     throw new NotFoundException('该商品未找到可用的 item_url');
