@@ -234,8 +234,18 @@ export class AccessControlService {
   }
 
   async getGroupPrices(groupId: string): Promise<Array<{ sku: string; price: string }>> {
+    // 只返回该分组可见商品中有匹配前缀的定价
+    const pvgLinks = await this.pvgRepo.find({ where: { groupId } });
+    if (pvgLinks.length === 0) return [];
+
+    const productIds = Array.from(new Set(pvgLinks.map((x) => x.productId)));
+    const products = await this.productRepo.find({ where: { id: In(productIds) } });
+    const boundPrefixes = new Set(products.map((p) => skuPrefix(p.sku)).filter(Boolean));
+
     const rows = await this.groupPriceRepo.find({ where: { groupId }, order: { sku: 'ASC' } });
-    return rows.map((r) => ({ sku: r.sku, price: r.price }));
+    return rows
+      .filter((r) => boundPrefixes.has(skuPrefix(r.sku)))
+      .map((r) => ({ sku: r.sku, price: r.price }));
   }
 
   async deleteGroupPrice(groupId: string, sku: string): Promise<boolean> {
